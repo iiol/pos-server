@@ -7,11 +7,6 @@
 #define SEC_PORT   1085
 #define UNSEC_PORT 1082
 
-struct packet {
-	uint8_t *data;
-	int len;
-};
-
 struct net_ctx {
 	int fd;
 	MYSQL *mysql;

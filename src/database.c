@@ -24,8 +24,8 @@ db_init(char *host, int port, char *user, char *passwd, char *db)
 	}
 
 	version = mysql_get_server_version(mysql);
-	printf("Connected to server\n");
-	printf("Server version: %ld.%ld.%ld\n", version/10000, (version/100)%100, version%100);
+	printf("MySql server version: %ld.%ld.%ld\n",
+	    version/10000, (version/100)%100, version%100);
 
 	return mysql;
 }
@@ -36,9 +36,32 @@ db_log_packet(MYSQL *mysql, struct packet_log_entry *plog)
 	size_t size;
 	char query[512 + 2*plog->len];
 
-	size = sprintf(query, "INSERT INTO PacketLog VALUES(0, %ld, %d, NOW(), %d, '",
-	    plog->sid, plog->pkg_type, plog->direction);
-	size += mysql_real_escape_string(mysql, query + size, plog->data, plog->len);
+	size = sprintf(query, "INSERT INTO PacketLog ");
+	size += sprintf(query + size, "(ID, SessionID, Type, Time, Direction, Data) ");
+	size += sprintf(query + size, "VALUES(0, %ld, %d, NOW(), %d, '",
+	    plog->sid, plog->type, plog->direction);
+	size += mysql_real_escape_string(mysql, query + size, (char*)plog->data, plog->len);
+	size += sprintf(query + size, "')");
+
+	if (mysql_real_query(mysql, query, size)) {
+		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		return 1;
+	}
+
+	return 0;
+}
+
+int
+db_log(MYSQL *mysql, struct log_entry *log)
+{
+	size_t size;
+	char query[512 + 2*strlen(log->text)];
+
+	size  = sprintf(query, "INSERT INTO Log ");
+	size += sprintf(query + size, "(SessionID, Time, LogPart, LogType, LogCode, Text) ");
+	size += sprintf(query + size, "VALUES(%ld, NULL, %d, %d, %d, '",
+	    log->sid, log->log_part, log->log_type, log->log_code);
+	size += mysql_real_escape_string(mysql, query + size, log->text, strlen(log->text));
 	size += sprintf(query + size, "')");
 
 	if (mysql_real_query(mysql, query, size)) {
@@ -111,7 +134,7 @@ null_terminating(char *str, unsigned int len)
 }
 
 struct terminals_entry*
-db_search_by_mac(MYSQL *mysql, char *mac)
+db_search_by_mac(MYSQL *mysql, uint64_t mac)
 {
 	int i;
 	int ret;
@@ -123,9 +146,6 @@ db_search_by_mac(MYSQL *mysql, char *mac)
 	int f[FLD_COUNT];
 	struct terminals_entry *entry;
 	char *s;
-
-	if (strlen(mac) > 17)
-		return NULL;
 
 	ret = mysql_real_query(mysql, query, strlen(query));
 	if (ret) {
@@ -146,9 +166,18 @@ db_search_by_mac(MYSQL *mysql, char *mac)
 		FOREACH_FLD(field->name, f, i, GENERATE_CMP);
 
 	while ((row = mysql_fetch_row(result)) != NULL) {
+		char mac_str[32];
+
+		sprintf(mac_str, "%ld", mac);
+
 		lengths = mysql_fetch_lengths(result);
-		if (!strncmp(row[f[TerminalMac]], mac, lengths[f[TerminalMac]]))
+		if (!strncmp(row[f[TerminalMac]], mac_str, lengths[f[TerminalMac]]))
 			break;
+	}
+
+	if (row == NULL) {
+		mysql_free_result(result);
+		return NULL;
 	}
 
 	entry = xmalloc(sizeof (struct terminals_entry));

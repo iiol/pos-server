@@ -19,20 +19,18 @@
 #include "net.h"
 
 
+struct packet {
+	// TODO delete pkt
+	uint16_t len;
+	uint16_t crc16;
+	uint64_t mac;
+	uint8_t num;
+	uint8_t type;
+	uint16_t version;
+};
+
 uint16_t crc_table[256];
 
-
-static void
-reverse(uint8_t *buf, int len)
-{
-	int start, end;
-
-	for (start = 0, end = len - 1; start < end; ++start, --end) {
-		buf[start] ^= buf[end];
-		buf[end] ^= buf[start];
-		buf[start] ^= buf[end];
-	}
-}
 
 void
 crc16_init(void)
@@ -54,7 +52,7 @@ crc16_init(void)
 }
 
 static uint16_t
-get_ctc16(const uint8_t *buf, uint16_t len)
+get_crc16(const uint8_t *buf, uint16_t len)
 {
 	uint16_t crc = 0xFFFF;
 
@@ -78,14 +76,15 @@ net_init(int port)
 
 	fd = SYSCALL(1, socket, AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	SYSCALL(1, bind, fd, (struct sockaddr*)&addr_in, SOCKLEN);
-	SYSCALL(1, listen, fd, 50);
+	SYSCALL(1, listen, fd, 32);
 
 	return fd;
 }
 
-struct packet*
-net_receive_pkt(MYSQL *mysql, int fd)
+static struct packet*
+net_receive_auth_pkt(MYSQL *mysql, int fd)
 {
+	int i;
 	struct msghdr msg = {0};
 	int bytes_read;
 	int ret;
@@ -93,6 +92,12 @@ net_receive_pkt(MYSQL *mysql, int fd)
 	uint8_t *buf;
 	uint16_t crc16;
 	struct packet *packet;
+	uint64_t mac;
+	char mac_str[18];
+	struct terminals_entry *entry;
+	struct log_entry log;
+	struct packet_log_entry pkt_log;
+	char *text = "Can't get full packet";
 
 	msg.msg_iov = xmalloc(sizeof (struct iovec));
 	msg.msg_iov->iov_base = xmalloc(4);
@@ -103,14 +108,25 @@ net_receive_pkt(MYSQL *mysql, int fd)
 	ret = recvmsg(fd, &msg, MSG_PEEK);
 
 	buf = msg.msg_iov->iov_base;
-	pkt_len = (((uint16_t)buf[1]) << 8) + (uint16_t)buf[0] + 4;
-	crc16 = (((uint16_t)buf[3]) << 8) + (uint16_t)buf[2];
+	pkt_len = ((uint16_t)buf[1] << 8) + (uint16_t)buf[0] + 4;
+	crc16 = ((uint16_t)buf[3] << 8) + (uint16_t)buf[2];
 
 	free(msg.msg_iov);
 	free(msg.msg_iov->iov_base);
 
 	if (pkt_len > 1412) {
-		fprintf(stderr, "Packet length is too big: %d\n", pkt_len);
+		text = alloca(256);
+		sprintf(text, "Packet length is too big: %d", pkt_len);
+
+		log.sid = 1;
+		log.log_part = 1;
+		log.log_type = 1;
+		log.log_code = 1;
+		log.text = text;
+
+		db_log(mysql, &log);
+		fprintf(stderr, "%s\n", text);
+
 		return NULL;
 	}
 
@@ -119,50 +135,138 @@ net_receive_pkt(MYSQL *mysql, int fd)
 	for (bytes_read = 0; bytes_read < pkt_len; bytes_read += ret) {
 		ret = read(fd, buf + bytes_read, pkt_len - bytes_read);
 		if (ret <= 0) {
-			fprintf(stderr, "Can't get full packet\n");
+			text = "Can't get full packet";
+
+			// TODO
+			log.sid = 1;
+			log.log_part = 1;
+			log.log_type = 1;
+			log.log_code = 1;
+			log.text = text;
+
+			db_log(mysql, &log);
+			fprintf(stderr, "%s\n", text);
 			free(buf);
+
 			return NULL;
 		}
 	}
 
-	if (crc16 != get_ctc16(buf + 4, pkt_len - 4)) {
-		fprintf(stderr, "crc16 of packet doesn't match: %d:%d\n", crc16, get_ctc16(buf + 4, pkt_len - 4));
+	if (crc16 != get_crc16(buf + 4, pkt_len - 4)) {
+		text = alloca(256);
+		sprintf(text, "crc16 of packet doesn't match: in packet: %d, calculated: %d",
+		    crc16, get_crc16(buf + 4, pkt_len - 4));
+
+		// TODO
+		log.sid = 1;
+		log.log_part = 1;
+		log.log_type = 1;
+		log.log_code = 1;
+		log.text = text;
+
+		db_log(mysql, &log);
+		fprintf(stderr, "%s\n", text);
 		free(buf);
+
 		return NULL;
 	}
 
-	int i;
-	uint8_t mac[6];
-	char mac_str[18];
-
-	memcpy(mac, buf + 4, 6);
-	reverse(mac, 6);
+	for (i = mac = 0; i < 6; ++i)
+		mac += (uint64_t)buf[4 + i] << 8*i;
 
 	for (i = 0; i < 6; ++i)
-		sprintf(mac_str + 3*i, "%.2x:", mac[i]);
-
+		sprintf(mac_str + 3*i, "%.2x:", buf[9 - i]);
 	mac_str[17] = '\0';
 
-	struct terminals_entry *entry;
-
-	entry = db_search_by_mac(mysql, mac_str);
+	entry = db_search_by_mac(mysql, mac);
 	if (!entry) {
-		fprintf(stderr, "Can't find '%s' in Terminals", mac_str);
+		text = alloca(256);
+		sprintf(text, "Can't find '%s' in Terminals\n", mac_str);
+
+		// TODO
+		log.sid = 1;
+		log.log_part = 1;
+		log.log_type = 1;
+		log.log_code = 1;
+		log.text = text;
+
+		db_log(mysql, &log);
+		fprintf(stderr, "%s\n", text);
+		free(buf);
+
 		return NULL;
 	}
-	printf("%s\n", entry->ssl_cert);
+
+	// TODO
+	pkt_log.sid = 1;
+	pkt_log.type = 1;
+	pkt_log.time = 1;
+	pkt_log.direction = CLITOSER;
+	pkt_log.len = pkt_len;
+	pkt_log.data = buf;
+	db_log_packet(mysql, &pkt_log);
+
 
 	packet = xmalloc(sizeof (struct packet));
-	packet->data = buf;
-	packet->len = pkt_len;
+	packet->crc16 = crc16;
+	packet->mac = mac;
+	// TODO
+	packet->num = 0;
+	packet->type = 1;
+	packet->len = pkt_len - 4;
+	packet->version = ((uint16_t)buf[13] << 8) + buf[12];
+
+	free(buf);
 
 	return packet;
+}
+
+int
+net_send_auth_pkt(MYSQL *mysql, uint64_t mac, int fd)
+{
+	int i;
+	uint16_t crc16;
+	uint32_t date;
+	uint16_t len = 16;
+	uint8_t buf[len];
+	int ret, written;
+
+	date = time(NULL);
+	buf[0] = (len - 4) & 0xFF;
+	buf[1] = ((len - 4) >> 8) & 0xFF;
+
+	for (i = 0; i < 6; ++i)
+		buf[4 + i] = (mac >> 8*i) & 0xFF;
+
+	// TODO
+	buf[10] = 0x00;	// serial number
+	buf[11] = 0x01; // type of packet
+
+	for (i = 0; i < 4; ++i)
+		buf[12 + i] = (date >> 8*i) & 0xFF;
+
+	crc16 = get_crc16(buf + 4, len - 4);
+
+	buf[2] = crc16 & 0xFF;
+	buf[3] = (crc16 >> 8) & 0xFF;
+
+	for (written = 0; written < len; written += ret) {
+		ret = write(fd, buf + written, len);
+		if (ret <= 0) {
+			fprintf(stderr, "Can't write full packet\n");
+			return -1;
+		}
+	}
+
+	return 0;
 }
 
 void*
 net_thread(void *args)
 {
+	int ret;
 	struct net_ctx *ctx = args;
+	MYSQL *mysql = ctx->mysql;
 	char *text;
 	struct packet *pkt;
 
@@ -174,16 +278,24 @@ net_thread(void *args)
 	printf("%s connect: %s:%d\n", text, inet_ntoa(ctx->addr.sin_addr),
 	    ntohs(ctx->addr.sin_port));
 
-	pkt = net_receive_pkt(ctx->mysql, ctx->fd);
-	if (pkt == NULL) {
+	pkt = net_receive_auth_pkt(mysql, ctx->fd);
+	if (!pkt) {
 		fprintf(stderr, "Can't get packet\n");
-		goto finalize;
+		goto close_fd;
 	}
 
-	free(pkt->data);
+	printf("Client version: %d\n", pkt->version);
+
+	ret = net_send_auth_pkt(mysql, pkt->mac, ctx->fd);
+	if (ret) {
+		fprintf(stderr, "Can't send packet\n");
+		goto free_pkt;
+	}
+
+free_pkt:
 	free(pkt);
 
-finalize:
+close_fd:
 	close(ctx->fd);
 	free(ctx);
 

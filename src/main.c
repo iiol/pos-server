@@ -28,10 +28,10 @@ main(void)
 		return 1;
 
 	plog.sid = 10;
-	plog.pkg_type = 5;
+	plog.type = 5;
 	plog.direction = SERTOCLI;
-	plog.data = "Hi";
-	plog.len = strlen(plog.data);
+	plog.data = (uint8_t*)"Hi";
+	plog.len = strlen((char*)plog.data);
 
 	sec_fd = net_init(SEC_PORT);
 	unsec_fd = net_init(UNSEC_PORT);

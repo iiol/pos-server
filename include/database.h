@@ -39,14 +39,22 @@ enum fld_types {
 
 struct packet_log_entry {
 	size_t sid;
-	int pkg_type;
+	int type;
 	int time;
 	enum direction {
 		SERTOCLI,
 		CLITOSER,
 	} direction;
-	char *data;
+	uint8_t *data;
 	size_t len;
+};
+
+struct log_entry {
+	size_t sid;
+	int log_part;
+	int log_type;
+	int log_code;
+	char *text;
 };
 
 struct terminals_entry {
@@ -62,8 +70,12 @@ struct terminals_entry {
 };
 
 MYSQL *db_init(char *host, int port, char *user, char *passwd, char *db);
+
 int db_log_packet(MYSQL *mysql, struct packet_log_entry *plog);
+int db_log(MYSQL *mysql, struct log_entry *log);
+
+struct terminals_entry *db_search_by_mac(MYSQL *mysql, uint64_t mac);
+
 int db_print_table(MYSQL *mysql, const char *tbl);
-struct terminals_entry *db_search_by_mac(MYSQL *mysql, char *mac);
 
 #endif // _DATABASE_H
