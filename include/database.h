@@ -40,7 +40,7 @@ enum fld_types {
 struct packet_log_entry {
 	size_t sid;
 	int type;
-	int time;
+	time_t time;
 	enum direction {
 		SERTOCLI,
 		CLITOSER,
@@ -51,12 +51,14 @@ struct packet_log_entry {
 
 struct log_entry {
 	size_t sid;
+	time_t time;
 	int log_part;
 	int log_type;
 	int log_code;
 	char *text;
 };
 
+// TODO: write free_functions for entry structs
 struct terminals_entry {
 	uint64_t mac;
 	char *ssl_cert;
@@ -69,10 +71,20 @@ struct terminals_entry {
 	int owner;
 };
 
+struct sessions_entry {
+	size_t sid;
+	uint32_t ip;
+	uint64_t mac;
+	time_t start_time;
+	time_t end_time;
+};
+
 MYSQL *db_init(char *host, int port, char *user, char *passwd, char *db);
 
 int db_log_packet(MYSQL *mysql, struct packet_log_entry *plog);
 int db_log(MYSQL *mysql, struct log_entry *log);
+int db_new_session(MYSQL *mysql, struct sessions_entry *session);
+int db_end_session(MYSQL *mysql, struct sessions_entry *session);
 
 struct terminals_entry *db_search_by_mac(MYSQL *mysql, uint64_t mac);
 

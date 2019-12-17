@@ -1,4 +1,4 @@
-CFLAGS = -Wall -Iinclude `pkg-config --cflags mysqlclient`
+CFLAGS = -Wall -Iinclude -ggdb `pkg-config --cflags mysqlclient`
 LFLAGS = `pkg-config --libs mysqlclient`
 
 TARGET = a.out

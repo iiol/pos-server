@@ -15,6 +15,11 @@ struct net_ctx {
 		SECURE,
 		UNSECURE,
 	} type;
+
+	size_t sid;
+	struct sessions_entry session;
+	uint8_t inp_pkt_num;
+	uint8_t out_pkt_num;
 };
 
 int net_init(int port);

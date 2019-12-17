@@ -1,9 +1,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "database.h"
 #include "macro.h"
+
+char*
+null_terminating(char *str, unsigned int len)
+{
+	char *ret;
+
+	if (strnlen(str, len) == len) {
+		ret = xmalloc(len + 1);
+		memcpy(ret, str, len);
+		ret[len] = '\0';
+	}
+	else {
+		ret = xmalloc(len);
+		memcpy(ret, str, len);
+	}
+
+	return ret;
+}
 
 MYSQL*
 db_init(char *host, int port, char *user, char *passwd, char *db)
@@ -35,11 +54,16 @@ db_log_packet(MYSQL *mysql, struct packet_log_entry *plog)
 {
 	size_t size;
 	char query[512 + 2*plog->len];
+	char time[64];
+	struct tm tm;
+
+	localtime_r(&plog->time, &tm);
+	strftime(time, 64, "%F %T", &tm);
 
 	size = sprintf(query, "INSERT INTO PacketLog ");
-	size += sprintf(query + size, "(ID, SessionID, Type, Time, Direction, Data) ");
-	size += sprintf(query + size, "VALUES(0, %ld, %d, NOW(), %d, '",
-	    plog->sid, plog->type, plog->direction);
+	size += sprintf(query + size, "(SessionID, Type, Time, Direction, Data) ");
+	size += sprintf(query + size, "VALUES(%ld, %d, '%s', %d, '",
+	    plog->sid, plog->type, time, plog->direction);
 	size += mysql_real_escape_string(mysql, query + size, (char*)plog->data, plog->len);
 	size += sprintf(query + size, "')");
 
@@ -63,6 +87,86 @@ db_log(MYSQL *mysql, struct log_entry *log)
 	    log->sid, log->log_part, log->log_type, log->log_code);
 	size += mysql_real_escape_string(mysql, query + size, log->text, strlen(log->text));
 	size += sprintf(query + size, "')");
+
+	if (mysql_real_query(mysql, query, size)) {
+		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		return 1;
+	}
+
+	return 0;
+}
+
+int
+db_new_session(MYSQL *mysql, struct sessions_entry *session)
+{
+	size_t size;
+	char query[512];
+	char time[64];
+	struct tm tm;
+	MYSQL_RES *result;
+	MYSQL_ROW row;
+
+	localtime_r(&session->start_time, &tm);
+	strftime(time, 64, "%F %T", &tm);
+
+	size = sprintf(query, "INSERT INTO Sessions ");
+	size += sprintf(query + size, "(ID, IP, TerminalMac, TimeStart) ");
+	size += sprintf(query + size, "VALUES(0, %d, %ld, '%s')",
+	    session->ip, session->mac, time);
+
+	if (mysql_real_query(mysql, query, size)) {
+		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		return 1;
+	}
+
+	size = sprintf(query, "SELECT ID, TerminalMac FROM Sessions");
+	if (mysql_real_query(mysql, query, size)) {
+		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		return 1;
+	}
+
+	result = mysql_use_result(mysql);
+	if (!result) {
+		fprintf(stderr, "mysql_use_result() error: %s\n", mysql_error(mysql));
+		return 1;
+	}
+
+	while ((row = mysql_fetch_row(result)) != NULL) {
+		unsigned long *lengths;
+		uint64_t mac;
+		char *text;
+
+		lengths = mysql_fetch_lengths(result);
+		text = null_terminating(row[1], lengths[1]);
+		mac = atoll(text);
+		free(text);
+
+		if (mac == session->mac) {
+			text = null_terminating(row[0], lengths[0]);
+			session->sid = atoll(text);
+			free(text);
+		}
+
+	}
+
+	mysql_free_result(result);
+
+	return 0;
+}
+
+int
+db_end_session(MYSQL *mysql, struct sessions_entry *session)
+{
+	size_t size;
+	char query[512];
+	char time[64];
+	struct tm tm;
+
+	localtime_r(&session->end_time, &tm);
+	strftime(time, 64, "%F %T", &tm);
+
+	size = sprintf(query, "UPDATE Sessions SET TimeEnd = '%s' WHERE ID = %ld",
+	    time, session->sid);
 
 	if (mysql_real_query(mysql, query, size)) {
 		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
@@ -113,24 +217,6 @@ db_print_table(MYSQL *mysql, const char *tbl)
 	mysql_free_result(result);
 
 	return 0;
-}
-
-char*
-null_terminating(char *str, unsigned int len)
-{
-	char *ret;
-
-	if (strnlen(str, len) == len) {
-		ret = xmalloc(len + 1);
-		memcpy(ret, str, len);
-		ret[len] = '\0';
-	}
-	else {
-		ret = xmalloc(len);
-		memcpy(ret, str, len);
-	}
-
-	return ret;
 }
 
 struct terminals_entry*
