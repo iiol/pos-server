@@ -60,6 +60,20 @@ struct packet {
 
 uint16_t crc_table[256];
 
+static void
+pkt_free(struct packet *pkt)
+{
+	switch (pkt->type) {
+	case LOG_PKT:
+		free(pkt->text);
+
+	case AUTH_PKT:
+	case PING_PKT:
+	case PURCHASE_PKT:
+		free(pkt);
+	}
+}
+
 
 static int
 xread(struct net_ctx *ctx, uint8_t *buf, size_t len)
@@ -531,11 +545,8 @@ net_thread(void *args)
 			ret = send_pkt(ctx, pkt);
 			if (ret) {
 				fprintf(stderr, "Can't send packet\n");
-				free(pkt);
-				goto finalize;
+				goto free_pkt;
 			}
-
-			free(pkt);
 
 			break;
 
@@ -543,25 +554,25 @@ net_thread(void *args)
 			ret = send_pkt(ctx, pkt);
 			if (ret) {
 				fprintf(stderr, "Can't send packet\n");
-				free(pkt);
-				goto finalize;
+				goto free_pkt;
 			}
-
-			free(pkt);
 
 			break;
 
 		case LOG_PKT:
 			printf("text: %.*s\n", pkt->text_len, pkt->text);
-			free(pkt->text);
-			free(pkt);
 
 			break;
 
 		case PURCHASE_PKT:
 			break;
 		}
+
+		pkt_free(pkt);
 	}
+
+free_pkt:
+	pkt_free(pkt);
 
 finalize:
 	ctx->session.end_time = time(NULL);
