@@ -71,6 +71,12 @@ pkt_free(struct packet *pkt)
 	case PING_PKT:
 	case PURCHASE_PKT:
 		free(pkt);
+		break;
+
+	default:
+		fprintf(stderr, "pkt_free(): Unknown packet type: %02x\n", pkt->type);
+		exit(1);
+		break;
 	}
 }
 
@@ -255,6 +261,16 @@ receive_pkt(struct net_ctx *ctx)
 	ctx->session.start_time = time(NULL);
 	db_new_session(mysql, &ctx->session);
 	ctx->sid = ctx->session.sid;
+
+	if (pkt->type != AUTH_PKT     &&
+	    pkt->type != PING_PKT     &&
+	    pkt->type != LOG_PKT      &&
+	    pkt->type != PURCHASE_PKT) {
+		fprintf(stderr, "Unknown packet type: %02x\n", pkt->type);
+		free(pkt);
+
+		return NULL;
+	}
 
 	if (pkt->num != ctx->inp_pkt_num++) {
 		text = alloca(256);
@@ -486,6 +502,11 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 
 	case LOG_PKT:
 	case PURCHASE_PKT:
+		break;
+
+	default:
+		fprintf(stderr, "send_pkt(): Unknown packet type: %02x\n", pkt->type);
+		exit(1);
 		break;
 	}
 
