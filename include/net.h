@@ -20,6 +20,8 @@ struct net_ctx {
 	struct sessions_entry session;
 	uint8_t inp_pkt_num;
 	uint8_t out_pkt_num;
+
+	SSL *ssl;
 };
 
 int net_init(int port);

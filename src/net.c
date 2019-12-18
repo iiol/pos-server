@@ -15,6 +15,9 @@
 #include <arpa/inet.h>
 #include <mysql/mysql.h>
 
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 #include "database.h"
 #include "macro.h"
 #include "net.h"
@@ -35,11 +38,22 @@ struct packet {
 
 	// special fields in packet body
 	union {
+		// auth packet
 		uint16_t version;
 
+		// ping packet
 		struct {
 			uint32_t cli_time;
 			uint16_t ms_time;
+		};
+
+		// log packet
+		struct {
+			uint8_t log_part;
+			uint8_t log_type;
+			uint16_t log_code;
+			uint8_t text_len;
+			char *text;
 		};
 	};
 };
@@ -48,30 +62,88 @@ uint16_t crc_table[256];
 
 
 static int
-real_write(int fd, uint8_t *buf, size_t len)
+xread(struct net_ctx *ctx, uint8_t *buf, size_t len)
 {
 	int ret;
-	size_t written;
+	size_t bytes_read;
 
-	for (written = 0; written < len; written += ret) {
-		ret = write(fd, buf + written, len);
-		if (ret <= 0)
+	switch (ctx->type) {
+	case SECURE:
+		ret = SSL_read(ctx->ssl, buf, len);
+		if (!ret)
 			return -1;
+
+		break;
+
+	case UNSECURE:
+		for (bytes_read = 0; bytes_read < len; bytes_read += ret) {
+			ret = read(ctx->fd, buf + bytes_read, len - bytes_read);
+			if (ret <= 0)
+				return -1;
+		}
+
+		break;
 	}
 
 	return 0;
 }
 
 static int
-real_read(int fd, uint8_t *buf, size_t len)
+xpeek(struct net_ctx *ctx, uint8_t *buf, size_t len)
 {
 	int ret;
 	size_t bytes_read;
+	struct msghdr msg = {0};
 
-	for (bytes_read = 0; bytes_read < len; bytes_read += ret) {
-		ret = read(fd, buf + bytes_read, len - bytes_read);
-		if (ret <= 0)
+	switch (ctx->type) {
+	case SECURE:
+		ret = SSL_peek(ctx->ssl, buf, len);
+		if (!ret)
 			return -1;
+
+		break;
+
+	case UNSECURE:
+		msg.msg_iov = alloca(sizeof (struct iovec));
+		msg.msg_iov->iov_base = buf;
+		msg.msg_iovlen = 1;
+
+		for (bytes_read = 0; bytes_read < len; bytes_read += ret) {
+			msg.msg_iov->iov_len = len - bytes_read;
+			msg.msg_iov->iov_base = buf + bytes_read;
+			ret = recvmsg(ctx->fd, &msg, MSG_PEEK);
+			if (ret <= 0)
+				return -1;
+		}
+
+		break;
+	}
+
+	return 0;
+}
+
+static int
+xwrite(struct net_ctx *ctx, uint8_t *buf, size_t len)
+{
+	int ret;
+	size_t written;
+
+	switch (ctx->type) {
+	case SECURE:
+		ret = SSL_write(ctx->ssl, buf, len);
+		if (!ret)
+			return -1;
+
+		break;
+
+	case UNSECURE:
+		for (written = 0; written < len; written += ret) {
+			ret = write(ctx->fd, buf + written, len);
+			if (ret <= 0)
+				return -1;
+		}
+
+		break;
 	}
 
 	return 0;
@@ -130,12 +202,10 @@ static struct packet*
 receive_pkt(struct net_ctx *ctx)
 {
 	int i;
-	struct msghdr msg = {0};
 	int ret;
 	uint8_t *buf;
 	//
 	MYSQL *mysql = ctx->mysql;
-	int fd = ctx->fd;
 	//
 	char mac_str[18];
 	//
@@ -146,31 +216,29 @@ receive_pkt(struct net_ctx *ctx)
 	char *text;
 	struct packet *pkt;
 
-	msg.msg_iov = xmalloc(sizeof (struct iovec));
-	msg.msg_iov->iov_base = xmalloc(12);
-	msg.msg_iov->iov_len = 12;
-	msg.msg_iovlen = 1;
-
-	// TODO: check return value
-	recvmsg(fd, &msg, MSG_PEEK);
-	buf = msg.msg_iov->iov_base;
+	buf = xmalloc(12);
+	ret = xpeek(ctx, buf, 12);
+	if (ret < 0) {
+		fprintf(stderr, "Can't get full packet\n");
+		free(buf);
+		return NULL;
+	}
 
 	pkt = xmalloc(sizeof (struct packet));
 	pkt->len = ((uint16_t)buf[1] << 8) + (uint16_t)buf[0] + 4;
 	pkt->crc16 = ((uint16_t)buf[3] << 8) + (uint16_t)buf[2];
-	pkt->num = buf[10];
-	pkt->type = buf[11];
 
 	for (i = pkt->mac = 0; i < 6; ++i)
 		pkt->mac += (uint64_t)buf[4 + i] << 8*i;
 
-	free(msg.msg_iov->iov_base);
-	free(msg.msg_iov);
+	pkt->num = buf[10];
+	pkt->type = buf[11];
+
+	free(buf);
 
 	ctx->session.ip = ntohl(ctx->addr.sin_addr.s_addr);
 	ctx->session.mac = pkt->mac;
 	ctx->session.start_time = time(NULL);
-
 	db_new_session(mysql, &ctx->session);
 	ctx->sid = ctx->session.sid;
 
@@ -179,59 +247,56 @@ receive_pkt(struct net_ctx *ctx)
 		sprintf(text, "Expected packet number: %d, but in packet: %d",
 		    ctx->inp_pkt_num - 1, pkt->num);
 
-		log.sid = 1;
+		log.sid = ctx->sid;
 		log.time = time(NULL);
 		log.log_part = 1;
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
-
 		db_log(mysql, &log);
-		fprintf(stderr, "%s\n", text);
 
+		fprintf(stderr, "%s\n", text);
 		free(pkt);
 
 		return NULL;
 	}
 
-	// TODO: add other packet lengths
 	if ((pkt->type == AUTH_PKT && pkt->len > 14) ||
 	    (pkt->type == PING_PKT && pkt->len > 18) ||
 	    pkt->len > 1412) {
 		text = alloca(256);
 		sprintf(text, "Packet length is too big: %d", pkt->len);
 
-		log.sid = 1;
+		log.sid = ctx->sid;
 		log.time = time(NULL);
 		log.log_part = 1;
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
-
 		db_log(mysql, &log);
-		fprintf(stderr, "%s\n", text);
 
+		fprintf(stderr, "%s\n", text);
 		free(pkt);
 
 		return NULL;
 	}
 	else if ((pkt->type == AUTH_PKT && pkt->len < 14) ||
 		 (pkt->type == PING_PKT && pkt->len < 18) ||
+		 (pkt->type == LOG_PKT && pkt->len < 17)  ||
 		 pkt->len < 12) {
 		text = alloca(256);
 		sprintf(text, "Packet length is too small: type: 0x%02x, len: %d",
 		    pkt->type, pkt->len);
 
-		log.sid = 1;
+		log.sid = ctx->sid;
 		log.time = time(NULL);
 		log.log_part = 1;
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
-
 		db_log(mysql, &log);
-		fprintf(stderr, "%s\n", text);
 
+		fprintf(stderr, "%s\n", text);
 		free(pkt);
 
 		return NULL;
@@ -239,23 +304,21 @@ receive_pkt(struct net_ctx *ctx)
 
 	buf = xmalloc(pkt->len);
 
-	ret = real_read(fd, buf, pkt->len);
+	ret = xread(ctx, buf, pkt->len);
 	if (ret < 0) {
 		text = "Can't get full packet";
 
-		// TODO
-		log.sid = 1;
+		log.sid = ctx->sid;
 		log.time = time(NULL);
 		log.log_part = 1;
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
-
 		db_log(mysql, &log);
-		fprintf(stderr, "%s\n", text);
 
-		free(buf);
+		fprintf(stderr, "%s\n", text);
 		free(pkt);
+		free(buf);
 
 		return NULL;
 	}
@@ -265,19 +328,17 @@ receive_pkt(struct net_ctx *ctx)
 		sprintf(text, "crc16 of packet doesn't match: in packet: %d, calculated: %d",
 		    pkt->crc16, get_crc16(buf + 4, pkt->len - 4));
 
-		// TODO
-		log.sid = 1;
+		log.sid = ctx->sid;
 		log.time = time(NULL);
 		log.log_part = 1;
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
-
 		db_log(mysql, &log);
-		fprintf(stderr, "%s\n", text);
 
-		free(buf);
+		fprintf(stderr, "%s\n", text);
 		free(pkt);
+		free(buf);
 
 		return NULL;
 	}
@@ -291,25 +352,22 @@ receive_pkt(struct net_ctx *ctx)
 		text = alloca(256);
 		sprintf(text, "Can't find '%s' in Terminals\n", mac_str);
 
-		// TODO
-		log.sid = 1;
+		log.sid = ctx->sid;
 		log.time = time(NULL);
 		log.log_part = 1;
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
-
 		db_log(mysql, &log);
-		fprintf(stderr, "%s\n", text);
 
-		free(buf);
+		fprintf(stderr, "%s\n", text);
 		free(pkt);
+		free(buf);
 
 		return NULL;
 	}
 
-	// TODO
-	pkt_log.sid = 1;
+	pkt_log.sid = ctx->sid;
 	pkt_log.type = pkt->type;
 	pkt_log.time = time(NULL);
 	pkt_log.direction = CLITOSER;
@@ -324,18 +382,39 @@ receive_pkt(struct net_ctx *ctx)
 
 	case PING_PKT:
 		for (i = pkt->cli_time = 0; i < 4; ++i)
-			pkt->cli_time += buf[13 + i] << 8*i;
+			pkt->cli_time += buf[12 + i] << 8*i;
 
-		pkt->ms_time =  ((uint16_t)buf[18] << 8) + buf[17];
+		pkt->ms_time = ((uint16_t)buf[17] << 8) + buf[16];
 
 		break;
 
 	case LOG_PKT:
+		pkt->log_part = buf[12];
+		pkt->log_type = buf[13];
+		pkt->log_code = ((uint16_t)buf[15] << 8) + buf[14];
+		pkt->text_len = buf[16];
+
+		if (pkt->len != 17 + buf[16]) {
+			fprintf(stderr, "Size in first header and size of text not match\n");
+
+			free(buf);
+			free(pkt);
+			db_free_terminals_entry(entry);
+
+			return NULL;
+		}
+
+		pkt->text = xmalloc(pkt->text_len);
+		memcpy(pkt->text, buf + 17, pkt->text_len);
+
+		break;
+
 	case PURCHASE_PKT:
 		break;
 	}
 
 	free(buf);
+	db_free_terminals_entry(entry);
 
 	return pkt;
 }
@@ -344,7 +423,6 @@ static int
 send_pkt(struct net_ctx *ctx, struct packet *pkt)
 {
 	int i;
-	int fd = ctx->fd;
 	MYSQL *mysql = ctx->mysql;
 	uint64_t mac = pkt->mac;
 	uint16_t crc16;
@@ -366,33 +444,49 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 		for (i = 0; i < 6; ++i)
 			buf[4 + i] = (mac >> 8*i) & 0xFF;
 
-		// TODO
 		buf[10] = ctx->out_pkt_num++;
 		buf[11] = pkt->type;
 
 		for (i = 0; i < 4; ++i)
 			buf[12 + i] = (date >> 8*i) & 0xFF;
 
-		crc16 = get_crc16(buf + 4, len - 4);
-
-		buf[2] = crc16 & 0xFF;
-		buf[3] = (crc16 >> 8) & 0xFF;
-
-		ret = real_write(fd, buf, len);
-		if (ret < 0) {
-			fprintf(stderr, "Can't write full packet\n");
-			return -1;
-		}
-
 		break;
 
 	case PING_PKT:
+		len = 18;
+		buf = alloca(len);
+
+		buf[0] = (len - 4) & 0xFF;
+		buf[1] = ((len - 4) >> 8) & 0xFF;
+
+		for (i = 0; i < 6; ++i)
+			buf[4 + i] = (mac >> 8*i) & 0xFF;
+
+		buf[10] = ctx->out_pkt_num++;
+		buf[11] = pkt->type;
+
+		for (i = 0; i < 4; ++i)
+			buf[12] = (pkt->cli_time >> 8*i) & 0xFF;
+
+		break;
+
 	case LOG_PKT:
 	case PURCHASE_PKT:
 		break;
 	}
 
-	pkt_log.sid = 1;
+	crc16 = get_crc16(buf + 4, len - 4);
+
+	buf[2] = crc16 & 0xFF;
+	buf[3] = (crc16 >> 8) & 0xFF;
+
+	ret = xwrite(ctx, buf, len);
+	if (ret < 0) {
+		fprintf(stderr, "Can't write full packet\n");
+		return -1;
+	}
+
+	pkt_log.sid = ctx->sid;
 	pkt_log.type = pkt->type;
 	pkt_log.time = time(NULL);
 	pkt_log.direction = SERTOCLI;
@@ -412,8 +506,9 @@ net_thread(void *args)
 	char *text;
 	struct packet *pkt;
 
-	if (ctx->type == SECURE)
+	if (ctx->type == SECURE) {
 		text = "Secure";
+	}
 	else
 		text = "Unsecure";
 
@@ -422,40 +517,60 @@ net_thread(void *args)
 
 	ctx->inp_pkt_num = ctx->out_pkt_num = 0;
 
-	pkt = receive_pkt(ctx);
-	if (!pkt) {
-		fprintf(stderr, "Can't get packet\n");
-		goto finalize;
-	}
-
-	switch (pkt->type) {
-	case AUTH_PKT:
-		printf("Client version: %d\n", pkt->version);
-
-		ret = send_pkt(ctx, pkt);
-		if (ret) {
-			fprintf(stderr, "Can't send packet\n");
-			free(pkt);
+	while (1) {
+		pkt = receive_pkt(ctx);
+		if (!pkt) {
+			fprintf(stderr, "Can't get packet\n");
 			goto finalize;
 		}
 
-		free(pkt);
+		switch (pkt->type) {
+		case AUTH_PKT:
+			printf("Client version: %d\n", pkt->version);
 
-		break;
+			ret = send_pkt(ctx, pkt);
+			if (ret) {
+				fprintf(stderr, "Can't send packet\n");
+				free(pkt);
+				goto finalize;
+			}
 
-	case PING_PKT:
-		//ret = send_ping_pkt(mysql, ctx->fd, pkt);
-		free(pkt);
-		break;
+			free(pkt);
 
-	case LOG_PKT:
-	case PURCHASE_PKT:
-		break;
+			break;
+
+		case PING_PKT:
+			ret = send_pkt(ctx, pkt);
+			if (ret) {
+				fprintf(stderr, "Can't send packet\n");
+				free(pkt);
+				goto finalize;
+			}
+
+			free(pkt);
+
+			break;
+
+		case LOG_PKT:
+			printf("text: %.*s\n", pkt->text_len, pkt->text);
+			free(pkt->text);
+			free(pkt);
+
+			break;
+
+		case PURCHASE_PKT:
+			break;
+		}
 	}
 
 finalize:
 	ctx->session.end_time = time(NULL);
 	db_end_session(mysql, &ctx->session);
+
+	if (ctx->type == SECURE) {
+		SSL_shutdown(ctx->ssl);
+		SSL_free(ctx->ssl);
+	}
 
 	close(ctx->fd);
 	free(ctx);

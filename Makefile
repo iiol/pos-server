@@ -1,5 +1,8 @@
-CFLAGS = -Wall -Iinclude -ggdb `pkg-config --cflags mysqlclient`
-LFLAGS = `pkg-config --libs mysqlclient`
+CC = gcc
+
+LIBS = mysqlclient libssl libcrypto
+CFLAGS = -Wall -Iinclude -ggdb `pkg-config --cflags $(LIBS)`
+LFLAGS = `pkg-config --libs $(LIBS)`
 
 TARGET = a.out
 SRC = $(wildcard src/*.c)

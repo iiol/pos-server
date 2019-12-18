@@ -295,3 +295,14 @@ db_search_by_mac(MYSQL *mysql, uint64_t mac)
 
 	return entry;
 }
+
+void
+db_free_terminals_entry(struct terminals_entry *entry)
+{
+	free(entry->ssl_cert);
+	free(entry->ssl_key);
+	free(entry->terminal_id);
+	free(entry->merchant_id);
+	free(entry->last_online);
+	free(entry);
+}

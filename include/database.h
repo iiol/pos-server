@@ -58,7 +58,6 @@ struct log_entry {
 	char *text;
 };
 
-// TODO: write free_functions for entry structs
 struct terminals_entry {
 	uint64_t mac;
 	char *ssl_cert;
@@ -87,6 +86,7 @@ int db_new_session(MYSQL *mysql, struct sessions_entry *session);
 int db_end_session(MYSQL *mysql, struct sessions_entry *session);
 
 struct terminals_entry *db_search_by_mac(MYSQL *mysql, uint64_t mac);
+void db_free_terminals_entry(struct terminals_entry *entry);
 
 int db_print_table(MYSQL *mysql, const char *tbl);
 
