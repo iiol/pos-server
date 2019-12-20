@@ -39,11 +39,11 @@ main(void)
 
 	SSL_CTX_set_ecdh_auto(ssl_ctx, 1);
 
-	if (SSL_CTX_use_certificate_file(ssl_ctx, "ssl/cert.pem", SSL_FILETYPE_PEM) <= 0) {
+	if (SSL_CTX_use_certificate_file(ssl_ctx, "ssl/cert_server.pem", SSL_FILETYPE_PEM) <= 0) {
 		ERR_print_errors_fp(stderr);
 		return 1;
 	}
-	if (SSL_CTX_use_PrivateKey_file(ssl_ctx, "ssl/key.pem", SSL_FILETYPE_PEM) <= 0 ) {
+	if (SSL_CTX_use_PrivateKey_file(ssl_ctx, "ssl/key_server.pem", SSL_FILETYPE_PEM) <= 0 ) {
 		ERR_print_errors_fp(stderr);
 		return 1;
 	}

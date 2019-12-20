@@ -2,12 +2,14 @@
 #define _DATABASE_H
 
 #include <stdint.h>
-
 #include <mysql/mysql.h>
+#include "macro.h"
 
 
 #define FOREACH_FLD(S, F, I, ARG)			\
 	ARG##_F(S, F, I, ID)				\
+	ARG(S, F, I, IP)				\
+	ARG(S, F, I, Port)				\
 	ARG(S, F, I, TerminalMac)			\
 	ARG(S, F, I, SSLCert)				\
 	ARG(S, F, I, SSLKey)				\
@@ -56,6 +58,7 @@ struct log_entry {
 	int log_type;
 	int log_code;
 	char *text;
+	size_t text_len;
 };
 
 struct terminals_entry {
@@ -78,6 +81,14 @@ struct sessions_entry {
 	time_t end_time;
 };
 
+struct bpc_entries {
+	size_t id;
+	uint32_t ip;
+	uint16_t port;
+
+	struct list_node _list;
+};
+
 MYSQL *db_init(char *host, int port, char *user, char *passwd, char *db);
 
 int db_log_packet(MYSQL *mysql, struct packet_log_entry *plog);
@@ -87,6 +98,9 @@ int db_end_session(MYSQL *mysql, struct sessions_entry *session);
 
 struct terminals_entry *db_search_by_mac(MYSQL *mysql, uint64_t mac);
 void db_free_terminals_entry(struct terminals_entry *entry);
+
+struct bpc_entries *db_get_bpc_hosts(MYSQL *mysql);
+void db_free_bpc_entries(struct bpc_entries *entries);
 
 int db_print_table(MYSQL *mysql, const char *tbl);
 

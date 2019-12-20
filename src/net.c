@@ -3,10 +3,12 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <alloca.h>
 #include <pthread.h>
 
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/select.h>
@@ -55,6 +57,14 @@ struct packet {
 			uint8_t text_len;
 			char *text;
 		};
+
+		struct {
+			uint32_t amount;
+			uint8_t details_len;
+			uint8_t *card_details;
+			uint8_t cryptogram_len;
+			uint8_t *cryptogram;
+		};
 	};
 };
 
@@ -64,13 +74,17 @@ static void
 pkt_free(struct packet *pkt)
 {
 	switch (pkt->type) {
-	case LOG_PKT:
-		free(pkt->text);
-
 	case AUTH_PKT:
 	case PING_PKT:
+		break;
+
+	case LOG_PKT:
+		free(pkt->text);
+		break;
+
 	case PURCHASE_PKT:
-		free(pkt);
+		free(pkt->card_details);
+		free(pkt->cryptogram);
 		break;
 
 	default:
@@ -78,6 +92,8 @@ pkt_free(struct packet *pkt)
 		exit(1);
 		break;
 	}
+
+	free(pkt);
 }
 
 
@@ -239,7 +255,6 @@ receive_pkt(struct net_ctx *ctx)
 	buf = xmalloc(12);
 	ret = xpeek(ctx, buf, 12);
 	if (ret < 0) {
-		fprintf(stderr, "Can't get full packet\n");
 		free(buf);
 		return NULL;
 	}
@@ -283,6 +298,7 @@ receive_pkt(struct net_ctx *ctx)
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
+		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
 		fprintf(stderr, "%s\n", text);
@@ -291,31 +307,12 @@ receive_pkt(struct net_ctx *ctx)
 		return NULL;
 	}
 
-	if ((pkt->type == AUTH_PKT && pkt->len > 14) ||
-	    (pkt->type == PING_PKT && pkt->len > 18) ||
-	    pkt->len > 1412) {
+	if ((pkt->type == AUTH_PKT     && pkt->len != 14)    ||
+	    (pkt->type == PING_PKT     && pkt->len != 18)    ||
+	    (pkt->type == LOG_PKT      && pkt->len <  17)    ||
+	    (pkt->type == PURCHASE_PKT && pkt->len <  17)) {
 		text = alloca(256);
-		sprintf(text, "Packet length is too big: %d", pkt->len);
-
-		log.sid = ctx->sid;
-		log.time = time(NULL);
-		log.log_part = 1;
-		log.log_type = 1;
-		log.log_code = 1;
-		log.text = text;
-		db_log(mysql, &log);
-
-		fprintf(stderr, "%s\n", text);
-		free(pkt);
-
-		return NULL;
-	}
-	else if ((pkt->type == AUTH_PKT && pkt->len < 14) ||
-		 (pkt->type == PING_PKT && pkt->len < 18) ||
-		 (pkt->type == LOG_PKT && pkt->len < 17)  ||
-		 pkt->len < 12) {
-		text = alloca(256);
-		sprintf(text, "Packet length is too small: type: 0x%02x, len: %d",
+		sprintf(text, "Packet length is wrong: type: 0x%02x, len: %d",
 		    pkt->type, pkt->len);
 
 		log.sid = ctx->sid;
@@ -324,6 +321,7 @@ receive_pkt(struct net_ctx *ctx)
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
+		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
 		fprintf(stderr, "%s\n", text);
@@ -344,6 +342,7 @@ receive_pkt(struct net_ctx *ctx)
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
+		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
 		fprintf(stderr, "%s\n", text);
@@ -364,6 +363,7 @@ receive_pkt(struct net_ctx *ctx)
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
+		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
 		fprintf(stderr, "%s\n", text);
@@ -388,6 +388,7 @@ receive_pkt(struct net_ctx *ctx)
 		log.log_type = 1;
 		log.log_code = 1;
 		log.text = text;
+		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
 		fprintf(stderr, "%s\n", text);
@@ -440,6 +441,38 @@ receive_pkt(struct net_ctx *ctx)
 		break;
 
 	case PURCHASE_PKT:
+		for (i = pkt->amount = 0; i < 4; ++i)
+			pkt->amount += buf[12 + i] << 8*i;
+
+		pkt->details_len = buf[16];
+		if (17 + pkt->details_len >= pkt->len) {
+			fprintf(stderr, "Wrong card details field length\n");
+
+			free(buf);
+			free(pkt);
+			db_free_terminals_entry(entry);
+
+			return NULL;
+		}
+
+		pkt->cryptogram_len = buf[17 + pkt->details_len];
+		if (18 + pkt->details_len + pkt->cryptogram_len != pkt->len) {
+			fprintf(stderr, "Wrong crytogram field length\n");
+			fprintf(stderr, "crypto len: %02x\n", pkt->cryptogram_len);
+
+			free(buf);
+			free(pkt);
+			db_free_terminals_entry(entry);
+
+			return NULL;
+		}
+
+		pkt->card_details = xmalloc(pkt->details_len);
+		pkt->cryptogram = xmalloc(pkt->cryptogram_len);
+
+		memcpy(pkt->card_details, buf + 17, pkt->details_len);
+		memcpy(pkt->cryptogram, buf + 18 + pkt->details_len, pkt->cryptogram_len);
+
 		break;
 	}
 
@@ -501,6 +534,8 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 		break;
 
 	case LOG_PKT:
+		break;
+
 	case PURCHASE_PKT:
 		break;
 
@@ -532,6 +567,163 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 	return 0;
 }
 
+static int
+send_to_bank(SSL *ssl, struct packet *pkt, struct terminals_entry *term)
+{
+	int pkt_size = 100 + pkt->details_len + pkt->cryptogram_len;
+	char buf[pkt_size];
+	char bitmap[] = {0x32, 0x30, 0x05, 0x80, 0x20, 0xC0, 0x82, 0x00};
+	struct tm tm;
+	time_t t;
+	char time_str[12];
+	int pos;
+
+	t = time(NULL);
+	localtime_r(&t, &tm);
+	strftime(time_str, 12, "%y%m%d%H%M%S", &tm);
+
+	pos = 0;
+	pos += sprintf(buf, "%04d", pkt_size);
+	pos += sprintf(buf + pos, "0200");
+	memcpy(buf + pos, bitmap, 8);
+	pos += 8;
+	pos += sprintf(buf + pos, "000000");
+	pos += sprintf(buf + pos, "%012d", pkt->amount);
+	pos += sprintf(buf + pos, "%s", time_str + 2);
+	pos += sprintf(buf + pos, "000001"); // TODO
+	pos += sprintf(buf + pos, "%s", time_str);
+	pos += sprintf(buf + pos, "070");			// pos entry mode
+	pos += sprintf(buf + pos, "200");			// function code
+	pos += sprintf(buf + pos, "02");			// pos condition code
+	pos += sprintf(buf + pos, "%02d", pkt->details_len);
+	memcpy(buf + pos, pkt->card_details, pkt->details_len);
+	pos += pkt->details_len;
+	pos += sprintf(buf + pos, "%8s", term->terminal_id);
+	pos += sprintf(buf + pos, "%15s", term->merchant_id);
+	pos += sprintf(buf + pos, "643");
+	pos += sprintf(buf + pos, "%02d", pkt->cryptogram_len);
+	memcpy(buf + pos, pkt->cryptogram, pkt->cryptogram_len);
+
+	SSL_write(ssl, buf, pkt_size);
+
+	return 0;
+}
+
+static int
+purchase_proc(struct net_ctx *ctx, struct packet *pkt)
+{
+	int ret;
+	struct terminals_entry *term;
+	struct bpc_entries *bpc_head, *bpc;
+	const SSL_METHOD *ssl_mtd;
+	SSL_CTX *ssl_ctx;
+	int cfd, kfd;
+	char cpath[] = "/tmp/cert.XXXXXX";
+	char kpath[] = "/tmp/key.XXXXXX";
+
+	term = db_search_by_mac(ctx->mysql, pkt->mac);
+	bpc_head = db_get_bpc_hosts(ctx->mysql);
+	if (term == NULL || bpc_head == NULL) {
+		db_free_bpc_entries(bpc_head);
+		db_free_terminals_entry(term);
+
+		return 1;
+	}
+
+	cfd = open(mktemp(cpath), O_WRONLY | O_CREAT, 0600);
+	kfd = open(mktemp(kpath), O_WRONLY | O_CREAT, 0600);
+	write(cfd, term->ssl_cert, strlen(term->ssl_cert));
+	write(kfd, term->ssl_key,  strlen(term->ssl_key));
+	close(cfd);
+	close(kfd);
+
+	ssl_mtd = SSLv23_client_method();
+	ssl_ctx = SSL_CTX_new(ssl_mtd);
+	if (!ssl_ctx) {
+		perror("Unable to create SSL context");
+		ERR_print_errors_fp(stderr);
+		unlink(cpath);
+		unlink(kpath);
+		return 1;
+	}
+
+	SSL_CTX_set_ecdh_auto(ssl_ctx, 1);
+
+	if (SSL_CTX_use_certificate_file(ssl_ctx, cpath, SSL_FILETYPE_PEM) <= 0 ||
+	    SSL_CTX_use_PrivateKey_file(ssl_ctx, kpath, SSL_FILETYPE_PEM) <= 0) {
+		ERR_print_errors_fp(stderr);
+		unlink(cpath);
+		unlink(kpath);
+		return 1;
+	}
+
+	unlink(cpath);
+	unlink(kpath);
+
+	list_foreach (bpc_head, bpc) {
+		SSL *ssl;
+		int fd;
+		struct sockaddr_in addr_in = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_ANY),
+			.sin_port = htons(0),
+		};
+		struct sockaddr_in host_in = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(bpc->ip),
+			.sin_port = htons(bpc->port),
+		};
+
+		fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		if (fd == -1) {
+			perror("socket()");
+			continue;
+		}
+
+		ret = bind(fd, (struct sockaddr*)&addr_in, SOCKLEN);
+		if (ret == -1) {
+			perror("bind()");
+			close(fd);
+			continue;
+		}
+
+		ret = connect(fd, (struct sockaddr*)&host_in, SOCKLEN);
+		if (ret == -1) {
+			perror("connect()");
+			close(fd);
+			continue;
+		}
+
+		ssl = SSL_new(ssl_ctx);
+
+		SSL_set_fd(ssl, fd);
+		if (SSL_connect(ssl) <= 0) {
+			ERR_print_errors_fp(stderr);
+
+			goto next_host;
+		}
+
+		ret = send_to_bank(ssl, pkt, term);
+		if (ret)
+			goto next_host;
+
+		// ret = recv_from_bank(ssl); // TODO
+
+		// TODO
+
+next_host:
+		SSL_shutdown(ssl);
+		SSL_free(ssl);
+		close(fd);
+	}
+
+	SSL_CTX_free(ssl_ctx);
+	db_free_terminals_entry(term);
+	db_free_bpc_entries(bpc_head);
+
+	return 0;
+}
+
 void*
 net_thread(void *args)
 {
@@ -540,6 +732,7 @@ net_thread(void *args)
 	MYSQL *mysql = ctx->mysql;
 	char *text;
 	struct packet *pkt;
+	struct log_entry log;
 
 	if (ctx->type == SECURE) {
 		text = "Secure";
@@ -581,11 +774,24 @@ net_thread(void *args)
 			break;
 
 		case LOG_PKT:
-			printf("text: %.*s\n", pkt->text_len, pkt->text);
+			log.sid = ctx->sid;
+			log.time = time(NULL);
+			log.log_part = pkt->log_part;
+			log.log_type = pkt->log_type;
+			log.log_code = pkt->log_code;
+			log.text = pkt->text;
+			log.text_len = pkt->text_len;
+			db_log(mysql, &log);
 
 			break;
 
 		case PURCHASE_PKT:
+			ret = purchase_proc(ctx, pkt);
+			if (ret) {
+				fprintf(stderr, "Can't connect to bank host\n");
+				continue;
+			}
+
 			break;
 		}
 

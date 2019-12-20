@@ -80,12 +80,17 @@ db_log(MYSQL *mysql, struct log_entry *log)
 {
 	size_t size;
 	char query[512 + 2*strlen(log->text)];
+	char time[64];
+	struct tm tm;
+
+	localtime_r(&log->time, &tm);
+	strftime(time, 64, "%F %T", &tm);
 
 	size  = sprintf(query, "INSERT INTO Log ");
 	size += sprintf(query + size, "(SessionID, Time, LogPart, LogType, LogCode, Text) ");
-	size += sprintf(query + size, "VALUES(%ld, NULL, %d, %d, %d, '",
-	    log->sid, log->log_part, log->log_type, log->log_code);
-	size += mysql_real_escape_string(mysql, query + size, log->text, strlen(log->text));
+	size += sprintf(query + size, "VALUES(%ld, '%s', %d, %d, %d, '",
+	    log->sid, time, log->log_part, log->log_type, log->log_code);
+	size += mysql_real_escape_string(mysql, query + size, log->text, log->text_len);
 	size += sprintf(query + size, "')");
 
 	if (mysql_real_query(mysql, query, size)) {
@@ -299,10 +304,76 @@ db_search_by_mac(MYSQL *mysql, uint64_t mac)
 void
 db_free_terminals_entry(struct terminals_entry *entry)
 {
+	if (entry == NULL)
+		return;
+
 	free(entry->ssl_cert);
 	free(entry->ssl_key);
 	free(entry->terminal_id);
 	free(entry->merchant_id);
 	free(entry->last_online);
 	free(entry);
+}
+
+struct bpc_entries*
+db_get_bpc_hosts(MYSQL *mysql)
+{
+	int i;
+	struct bpc_entries *bpc_head = NULL;
+	int ret;
+	char query[] = "SELECT * FROM BpcHosts";
+	MYSQL_RES *result;
+	MYSQL_ROW row;
+	MYSQL_FIELD *field;
+	int f[FLD_COUNT];
+
+	ret = mysql_real_query(mysql, query, strlen(query));
+	if (ret) {
+		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		return NULL;
+	}
+
+	result = mysql_use_result(mysql);
+	if (!result) {
+		fprintf(stderr, "mysql_use_result() error: %s\n", mysql_error(mysql));
+		return NULL;
+	}
+
+	// Generate array 'f' where
+	// index is field name (in enum fld_types) and
+	// value is number of field in table
+	for (i = 0; (field = mysql_fetch_field(result)) != NULL; ++i)
+		FOREACH_FLD(field->name, f, i, GENERATE_CMP);
+
+	while ((row = mysql_fetch_row(result)) != NULL) {
+		char *s;
+		unsigned long *lengths;
+
+		lengths = mysql_fetch_lengths(result);
+		bpc_head = list_alloc_at_end(bpc_head);
+
+		s = null_terminating(row[f[ID]], lengths[f[ID]]);
+		bpc_head->id = atoll(s);
+		free(s);
+
+		s = null_terminating(row[f[IP]], lengths[f[IP]]);
+		bpc_head->ip = atoll(s);
+		free(s);
+
+		s = null_terminating(row[f[Port]], lengths[f[Port]]);
+		bpc_head->port = atoll(s);
+		free(s);
+	}
+
+	return list_get_head(bpc_head);
+}
+
+void
+db_free_bpc_entries(struct bpc_entries *entries)
+{
+	if (entries == NULL)
+		return;
+
+	for (; entries != NULL; entries = list_delete(entries))
+		;
 }

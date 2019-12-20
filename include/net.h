@@ -3,7 +3,7 @@
 
 #include <netinet/in.h>
 
-#define SOCKLEN sizeof (struct sockaddr_in)
+#define SOCKLEN ((socklen_t)sizeof (struct sockaddr_in))
 #define SEC_PORT   1085
 #define UNSEC_PORT 1082
 
