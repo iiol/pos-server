@@ -19,6 +19,7 @@ int
 main(void)
 {
 	MYSQL *mysql;
+	int ret;
 	int sec_fd, unsec_fd;
 	struct packet_log_entry plog;
 	fd_set fds;
@@ -51,8 +52,10 @@ main(void)
 	crc16_init();
 
 	mysql = db_init("127.0.0.1", 3306, "user", "P@ssw0rd", "test_db");
-	if (!mysql)
+	if (!mysql) {
+		error("Can't connect to mysql");
 		return 1;
+	}
 
 	plog.sid = 10;
 	plog.type = 5;
@@ -60,8 +63,8 @@ main(void)
 	plog.data = (uint8_t*)"Hi";
 	plog.len = strlen((char*)plog.data);
 
-	sec_fd = net_init(SEC_PORT);
-	unsec_fd = net_init(UNSEC_PORT);
+	sec_fd = net_bind_sock(SEC_PORT);
+	unsec_fd = net_bind_sock(UNSEC_PORT);
 	max_fd = (sec_fd > unsec_fd) ? sec_fd : unsec_fd;
 
 	while (1) {
@@ -75,9 +78,14 @@ main(void)
 		FD_SET(sec_fd, &fds);
 		FD_SET(unsec_fd, &fds);
 
-		SYSCALL(1, select, max_fd + 1, &fds, NULL, NULL, NULL);
+		ret = SYSCALL(0, select, max_fd + 1, &fds, NULL, NULL, NULL);
+		if (ret == -1)
+			continue;
+
 		if (FD_ISSET(sec_fd, &fds)) {
-			cfd = SYSCALL(1, accept, sec_fd, (struct sockaddr*)&cli_addr, &socklen);
+			cfd = SYSCALL(0, accept, sec_fd, (struct sockaddr*)&cli_addr, &socklen);
+			if (cfd == -1)
+				continue;
 
 			ctx = xmalloc(sizeof (struct net_ctx));
 			ctx->fd = cfd;
@@ -92,16 +100,26 @@ main(void)
 
 				SSL_shutdown(ctx->ssl);
 				SSL_free(ctx->ssl);
-				close(cfd);
+				SYSCALL(0, close, cfd);
 				free(ctx);
 
 				continue;
 			}
 
-			pthread_create(&thread, NULL, net_thread, ctx);
+			errno = pthread_create(&thread, NULL, net_thread, ctx);
+			if (errno) {
+				perror("pthread_create()");
+
+				SSL_shutdown(ctx->ssl);
+				SSL_free(ctx->ssl);
+				SYSCALL(0, close, cfd);
+				free(ctx);
+			}
 		}
 		else if (FD_ISSET(unsec_fd, &fds)) {
-			cfd = SYSCALL(1, accept, unsec_fd, (struct sockaddr*)&cli_addr, &socklen);
+			cfd = SYSCALL(0, accept, unsec_fd, (struct sockaddr*)&cli_addr, &socklen);
+			if (cfd == -1)
+				continue;
 
 			ctx = xmalloc(sizeof (struct net_ctx));
 			ctx->fd = cfd;
@@ -113,8 +131,8 @@ main(void)
 		}
 	}
 
-	close(sec_fd);
-	close(unsec_fd);
+	SYSCALL(0, close, sec_fd);
+	SYSCALL(0, close, unsec_fd);
 	mysql_close(mysql);
 	SSL_CTX_free(ssl_ctx);
 	EVP_cleanup();

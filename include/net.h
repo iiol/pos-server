@@ -24,7 +24,7 @@ struct net_ctx {
 	SSL *ssl;
 };
 
-int net_init(int port);
+int net_bind_sock(int port);
 void crc16_init(void);
 void *net_thread(void *args);
 

@@ -23,11 +23,42 @@
 									\
 	if (__ret == -1) {						\
 		perror(#func "(" #__VA_ARGS__ ")");			\
-		exit(estat);						\
+		if (estat != 0)						\
+			exit(estat);					\
 	}								\
 									\
 	__ret;								\
 })
+
+#ifndef FULL_LOG
+#define _int_logit _int_logit_short
+#else
+#define _int_logit _int_logit_full
+#endif
+
+#define _int_logit_short(fp, prefix, fmt, ...)				\
+do {									\
+	fprintf(fp, prefix "%20.20s| " fmt, __FUNCTION__, ##__VA_ARGS__);\
+	fflush(fp);							\
+} while (0)
+
+#define _int_logit_full(fp, prefix, fmt, ...)				\
+do {									\
+	fprintf(fp, prefix "%7.7s:%d %20.20s| " fmt,			\
+	    __FILE__, __LINE__, __FUNCTION__, __VA_ARGS__);		\
+	fflush(fp);							\
+} while (0)
+
+#define debug(fmt, ...)   _int_logit(stderr, "[D] ", fmt, ##__VA_ARGS__)
+#define warning(fmt, ...) _int_logit(stderr, "[W] ", fmt, ##__VA_ARGS__)
+#define error(fmt, ...)   _int_logit(stderr, "[E] ", fmt, ##__VA_ARGS__)
+#define perror(str)							\
+do {									\
+	char buf[32];							\
+									\
+	strerror_r(errno, buf, 32);					\
+	_int_logit(stderr, "[E] ", "%s: %s\n", str, buf);		\
+} while(0)
 
 static inline void*
 xmalloc(size_t size)

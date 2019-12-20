@@ -28,23 +28,18 @@ MYSQL*
 db_init(char *host, int port, char *user, char *passwd, char *db)
 {
 	MYSQL *mysql;
-	unsigned long version;
+	unsigned long mysql_ver;
 
 	mysql = mysql_init(NULL);
-	if (!mysql) {
-		fprintf(stderr, "Can't init mysql\n");
+	if (!mysql)
 		return NULL;
-	}
 
-	if (!mysql_real_connect(mysql, host, user, passwd, db, port, NULL, 0)) {
-		fprintf(stderr, "Connect to '%s' %s@%s:%d failed: %s \n",
-		    db, user, host, port, mysql_error(mysql));
+	if (!mysql_real_connect(mysql, host, user, passwd, db, port, NULL, 0))
 		return NULL;
-	}
 
-	version = mysql_get_server_version(mysql);
-	printf("MySql server version: %ld.%ld.%ld\n",
-	    version/10000, (version/100)%100, version%100);
+	mysql_ver = mysql_get_server_version(mysql);
+	debug("MySql server version: %ld.%ld.%ld\n",
+	    mysql_ver/10000, (mysql_ver/100)%100, mysql_ver%100);
 
 	return mysql;
 }
@@ -68,7 +63,7 @@ db_log_packet(MYSQL *mysql, struct packet_log_entry *plog)
 	size += sprintf(query + size, "')");
 
 	if (mysql_real_query(mysql, query, size)) {
-		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return 1;
 	}
 
@@ -94,7 +89,7 @@ db_log(MYSQL *mysql, struct log_entry *log)
 	size += sprintf(query + size, "')");
 
 	if (mysql_real_query(mysql, query, size)) {
-		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return 1;
 	}
 
@@ -120,19 +115,19 @@ db_new_session(MYSQL *mysql, struct sessions_entry *session)
 	    session->ip, session->mac, time);
 
 	if (mysql_real_query(mysql, query, size)) {
-		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return 1;
 	}
 
 	size = sprintf(query, "SELECT ID, TerminalMac FROM Sessions");
 	if (mysql_real_query(mysql, query, size)) {
-		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return 1;
 	}
 
 	result = mysql_use_result(mysql);
 	if (!result) {
-		fprintf(stderr, "mysql_use_result() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return 1;
 	}
 
@@ -174,52 +169,9 @@ db_end_session(MYSQL *mysql, struct sessions_entry *session)
 	    time, session->sid);
 
 	if (mysql_real_query(mysql, query, size)) {
-		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return 1;
 	}
-
-	return 0;
-}
-
-int
-db_print_table(MYSQL *mysql, const char *tbl)
-{
-	int i;
-	int ret;
-	unsigned int num_fields;
-	MYSQL_RES *result;
-	MYSQL_ROW row;
-	MYSQL_FIELD *field;
-	char query[2048] = "SELECT * FROM ";
-
-	strncat(query, tbl, 2048);
-	ret = mysql_real_query(mysql, query, strlen(query));
-	if (ret) {
-		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
-		return 1;
-	}
-
-	result = mysql_use_result(mysql);
-	if (!result) {
-		fprintf(stderr, "mysql_use_result() error: %s\n", mysql_error(mysql));
-		return 1;
-	}
-
-	while ((field = mysql_fetch_field(result)) != NULL)
-		printf("%s ", field->name);
-	putchar('\n');
-
-	num_fields = mysql_num_fields(result);
-	while ((row = mysql_fetch_row(result)) != NULL) {
-		unsigned long *lengths;
-
-		lengths = mysql_fetch_lengths(result);
-		for(i = 0; i < num_fields; i++)
-			printf("[%.*s] ", (int)lengths[i], row[i] ? row[i] : "NULL");
-		putchar('\n');
-	}
-
-	mysql_free_result(result);
 
 	return 0;
 }
@@ -240,13 +192,13 @@ db_search_by_mac(MYSQL *mysql, uint64_t mac)
 
 	ret = mysql_real_query(mysql, query, strlen(query));
 	if (ret) {
-		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return NULL;
 	}
 
 	result = mysql_store_result(mysql);
 	if (!result) {
-		fprintf(stderr, "mysql_store_result() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return NULL;
 	}
 
@@ -329,13 +281,13 @@ db_get_bpc_hosts(MYSQL *mysql)
 
 	ret = mysql_real_query(mysql, query, strlen(query));
 	if (ret) {
-		fprintf(stderr, "mysql_real_query() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return NULL;
 	}
 
 	result = mysql_use_result(mysql);
 	if (!result) {
-		fprintf(stderr, "mysql_use_result() error: %s\n", mysql_error(mysql));
+		warning("%s\n", mysql_error(mysql));
 		return NULL;
 	}
 
