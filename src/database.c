@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <assert.h>
+#include <alloca.h>
 
 #include "database.h"
 #include "macro.h"
@@ -10,6 +12,8 @@ char*
 null_terminating(char *str, unsigned int len)
 {
 	char *ret;
+
+	assert(str && "Argument is NULL");
 
 	if (strnlen(str, len) == len) {
 		ret = xmalloc(len + 1);
@@ -30,6 +34,11 @@ db_init(char *host, int port, char *user, char *passwd, char *db)
 	MYSQL *mysql;
 	unsigned long mysql_ver;
 
+	assert(host   && "Argument is NULL");
+	assert(user   && "Argument is NULL");
+	assert(passwd && "Argument is NULL");
+	assert(db     && "Argument is NULL");
+
 	mysql = mysql_init(NULL);
 	if (!mysql)
 		return NULL;
@@ -38,7 +47,7 @@ db_init(char *host, int port, char *user, char *passwd, char *db)
 		return NULL;
 
 	mysql_ver = mysql_get_server_version(mysql);
-	debug("MySql server version: %ld.%ld.%ld\n",
+	debug("MySql server version: %ld.%ld.%ld",
 	    mysql_ver/10000, (mysql_ver/100)%100, mysql_ver%100);
 
 	return mysql;
@@ -48,9 +57,14 @@ int
 db_log_packet(MYSQL *mysql, struct packet_log_entry *plog)
 {
 	size_t size;
-	char query[512 + 2*plog->len];
+	char *query;
 	char time[64];
 	struct tm tm;
+
+	assert(mysql && "Argument is NULL");
+	assert(plog  && "Argument is NULL");
+
+	query = alloca(512 + 2*plog->len);
 
 	localtime_r(&plog->time, &tm);
 	strftime(time, 64, "%F %T", &tm);
@@ -63,7 +77,7 @@ db_log_packet(MYSQL *mysql, struct packet_log_entry *plog)
 	size += sprintf(query + size, "')");
 
 	if (mysql_real_query(mysql, query, size)) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
 		return 1;
 	}
 
@@ -74,9 +88,14 @@ int
 db_log(MYSQL *mysql, struct log_entry *log)
 {
 	size_t size;
-	char query[512 + 2*strlen(log->text)];
+	char *query;
 	char time[64];
 	struct tm tm;
+
+	assert(mysql && "Argument is NULL");
+	assert(log   && "Argument is NULL");
+
+	query = alloca(512 + 2*strlen(log->text));
 
 	localtime_r(&log->time, &tm);
 	strftime(time, 64, "%F %T", &tm);
@@ -89,7 +108,7 @@ db_log(MYSQL *mysql, struct log_entry *log)
 	size += sprintf(query + size, "')");
 
 	if (mysql_real_query(mysql, query, size)) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
 		return 1;
 	}
 
@@ -106,6 +125,9 @@ db_new_session(MYSQL *mysql, struct sessions_entry *session)
 	MYSQL_RES *result;
 	MYSQL_ROW row;
 
+	assert(mysql   && "Argument is NULL");
+	assert(session && "Argument is NULL");
+
 	localtime_r(&session->start_time, &tm);
 	strftime(time, 64, "%F %T", &tm);
 
@@ -115,19 +137,19 @@ db_new_session(MYSQL *mysql, struct sessions_entry *session)
 	    session->ip, session->mac, time);
 
 	if (mysql_real_query(mysql, query, size)) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
 		return 1;
 	}
 
 	size = sprintf(query, "SELECT ID, TerminalMac FROM Sessions");
 	if (mysql_real_query(mysql, query, size)) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
 		return 1;
 	}
 
 	result = mysql_use_result(mysql);
 	if (!result) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
 		return 1;
 	}
 
@@ -162,6 +184,9 @@ db_end_session(MYSQL *mysql, struct sessions_entry *session)
 	char time[64];
 	struct tm tm;
 
+	assert(mysql   && "Argument is NULL");
+	assert(session && "Argument is NULL");
+
 	localtime_r(&session->end_time, &tm);
 	strftime(time, 64, "%F %T", &tm);
 
@@ -169,7 +194,54 @@ db_end_session(MYSQL *mysql, struct sessions_entry *session)
 	    time, session->sid);
 
 	if (mysql_real_query(mysql, query, size)) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
+		return 1;
+	}
+
+	return 0;
+}
+
+int
+db_new_transaction(MYSQL *mysql, struct transactions_entry *ta)
+{
+	size_t size;
+	char *query;
+	char time[64];
+	struct tm tm;
+
+	assert(mysql && "Argument is NULL");
+	assert(ta && ta->rrn && ta->approval_num && ta->terminal_id &&
+	    ta->cashbox_fn && ta->cashbox_fn && ta->cashbox_i && ta->cashbox_fd &&
+	    "Argument is NULL");
+
+	size = 512 + 2*(strlen(ta->rrn) + strlen(ta->approval_num) +
+	    strlen(ta->terminal_id) + strlen(ta->cashbox_fn) +
+	    strlen(ta->cashbox_i) + strlen(ta->cashbox_fd));
+	query = alloca(size);
+
+	localtime_r(&ta->time, &tm);
+	strftime(time, 64, "%F %T", &tm);
+
+	size = sprintf(query, "INSERT INTO Transactions ");
+	size += sprintf(query + size, "(Summ, ResponseCode, TerminalMac, Time, "
+	    "Result, RRN, ApprovalNumber, TerminalID, Kassa_fn, Kassa_i, Kassa_fd) "
+	    "VALUES(%f, %d, %ld, '%s', %d, '",
+	    ta->amount, ta->response_code, ta->terminal_mac, time, ta->result);
+	size += mysql_real_escape_string(mysql, query + size, ta->rrn, strlen(ta->rrn));
+	size += sprintf(query + size, "', '");
+	size += mysql_real_escape_string(mysql, query + size, ta->approval_num, strlen(ta->approval_num));
+	size += sprintf(query + size, "', '");
+	size += mysql_real_escape_string(mysql, query + size, ta->terminal_id, strlen(ta->terminal_id));
+	size += sprintf(query + size, "', '");
+	size += mysql_real_escape_string(mysql, query + size, ta->cashbox_fn, strlen(ta->cashbox_fn));
+	size += sprintf(query + size, "', '");
+	size += mysql_real_escape_string(mysql, query + size, ta->cashbox_i, strlen(ta->cashbox_i));
+	size += sprintf(query + size, "', '");
+	size += mysql_real_escape_string(mysql, query + size, ta->cashbox_fd, strlen(ta->cashbox_fd));
+	size += sprintf(query + size, "')");
+
+	if (mysql_real_query(mysql, query, size)) {
+		warning("%s", mysql_error(mysql));
 		return 1;
 	}
 
@@ -181,7 +253,7 @@ db_search_by_mac(MYSQL *mysql, uint64_t mac)
 {
 	int i;
 	int ret;
-	char query[] = "SELECT * FROM Terminals";
+	char *query = "SELECT * FROM Terminals";
 	MYSQL_RES *result;
 	MYSQL_ROW row;
 	MYSQL_FIELD *field;
@@ -190,15 +262,17 @@ db_search_by_mac(MYSQL *mysql, uint64_t mac)
 	struct terminals_entry *entry;
 	char *s;
 
+	assert(mysql && "Argument is NULL");
+
 	ret = mysql_real_query(mysql, query, strlen(query));
 	if (ret) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
 		return NULL;
 	}
 
 	result = mysql_store_result(mysql);
 	if (!result) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
 		return NULL;
 	}
 
@@ -273,21 +347,23 @@ db_get_bpc_hosts(MYSQL *mysql)
 	int i;
 	struct bpc_entries *bpc_head = NULL;
 	int ret;
-	char query[] = "SELECT * FROM BpcHosts";
+	char *query = "SELECT * FROM BpcHosts";
 	MYSQL_RES *result;
 	MYSQL_ROW row;
 	MYSQL_FIELD *field;
 	int f[FLD_COUNT];
 
+	assert(mysql && "Argument is NULL");
+
 	ret = mysql_real_query(mysql, query, strlen(query));
 	if (ret) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
 		return NULL;
 	}
 
 	result = mysql_use_result(mysql);
 	if (!result) {
-		warning("%s\n", mysql_error(mysql));
+		warning("%s", mysql_error(mysql));
 		return NULL;
 	}
 

@@ -89,19 +89,34 @@ struct bpc_entries {
 	struct list_node _list;
 };
 
+struct transactions_entry {
+	float amount;
+	char *rrn;
+	char *approval_num;
+	int response_code;
+	char *terminal_id;
+	uint64_t terminal_mac;
+	time_t time;
+	int result;
+	char *cashbox_fn;
+	char *cashbox_i;
+	char *cashbox_fd;
+};
+
+
 MYSQL *db_init(char *host, int port, char *user, char *passwd, char *db);
 
+// add to database
 int db_log_packet(MYSQL *mysql, struct packet_log_entry *plog);
 int db_log(MYSQL *mysql, struct log_entry *log);
 int db_new_session(MYSQL *mysql, struct sessions_entry *session);
 int db_end_session(MYSQL *mysql, struct sessions_entry *session);
+int db_new_transaction(MYSQL *mysql, struct transactions_entry *ta);
 
+// get from database
 struct terminals_entry *db_search_by_mac(MYSQL *mysql, uint64_t mac);
 void db_free_terminals_entry(struct terminals_entry *entry);
-
 struct bpc_entries *db_get_bpc_hosts(MYSQL *mysql);
 void db_free_bpc_entries(struct bpc_entries *entries);
-
-int db_print_table(MYSQL *mysql, const char *tbl);
 
 #endif // _DATABASE_H

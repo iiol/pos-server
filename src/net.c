@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <alloca.h>
+#include <assert.h>
 #include <pthread.h>
 
 #include <sys/types.h>
@@ -58,6 +59,7 @@ struct packet {
 			char *text;
 		};
 
+		// purchase packet
 		struct {
 			uint32_t amount;
 			uint8_t details_len;
@@ -85,6 +87,9 @@ uint16_t crc_table[256];
 static void
 pkt_free(struct packet *pkt)
 {
+	if (pkt == NULL)
+		return;
+
 	switch (pkt->type) {
 	case AUTH_PKT:
 	case PING_PKT:
@@ -100,7 +105,7 @@ pkt_free(struct packet *pkt)
 		break;
 
 	default:
-		warning("Unknown packet type: %02x\n", pkt->type);
+		error("Unknown packet type: %02x", pkt->type);
 		exit(1);
 		break;
 	}
@@ -115,6 +120,9 @@ xread(struct net_ctx *ctx, uint8_t *buf, size_t len)
 	int ret;
 	size_t bytes_read;
 
+	assert(ctx && "Argument is NULL");
+	assert(buf && "Argument is NULL");
+
 	switch (ctx->type) {
 	case SECURE:
 		ret = SSL_read(ctx->ssl, buf, len);
@@ -125,7 +133,7 @@ xread(struct net_ctx *ctx, uint8_t *buf, size_t len)
 
 	case UNSECURE:
 		for (bytes_read = 0; bytes_read < len; bytes_read += ret) {
-			ret = read(ctx->fd, buf + bytes_read, len - bytes_read);
+			ret = SYSCALL(0, read, ctx->fd, buf + bytes_read, len - bytes_read);
 			if (ret <= 0)
 				return -1;
 		}
@@ -143,6 +151,9 @@ xpeek(struct net_ctx *ctx, uint8_t *buf, size_t len)
 	size_t bytes_read;
 	struct msghdr msg = {0};
 
+	assert(ctx && "Argument is NULL");
+	assert(buf && "Argument is NULL");
+
 	switch (ctx->type) {
 	case SECURE:
 		ret = SSL_peek(ctx->ssl, buf, len);
@@ -159,7 +170,7 @@ xpeek(struct net_ctx *ctx, uint8_t *buf, size_t len)
 		for (bytes_read = 0; bytes_read < len; bytes_read += ret) {
 			msg.msg_iov->iov_len = len - bytes_read;
 			msg.msg_iov->iov_base = buf + bytes_read;
-			ret = recvmsg(ctx->fd, &msg, MSG_PEEK);
+			ret = SYSCALL(0, recvmsg, ctx->fd, &msg, MSG_PEEK);
 			if (ret <= 0)
 				return -1;
 		}
@@ -176,6 +187,9 @@ xwrite(struct net_ctx *ctx, uint8_t *buf, size_t len)
 	int ret;
 	size_t written;
 
+	assert(ctx && "Argument is NULL");
+	assert(buf && "Argument is NULL");
+
 	switch (ctx->type) {
 	case SECURE:
 		ret = SSL_write(ctx->ssl, buf, len);
@@ -186,7 +200,7 @@ xwrite(struct net_ctx *ctx, uint8_t *buf, size_t len)
 
 	case UNSECURE:
 		for (written = 0; written < len; written += ret) {
-			ret = write(ctx->fd, buf + written, len);
+			ret = SYSCALL(0, write, ctx->fd, buf + written, len);
 			if (ret <= 0)
 				return -1;
 		}
@@ -221,6 +235,8 @@ get_crc16(const uint8_t *buf, uint16_t len)
 {
 	uint16_t crc = 0xFFFF;
 
+	assert(buf && "Argument is NULL");
+
 	while (len--)
 		crc = crc_table[((crc>>8)^*buf++)&0xFF] ^ (crc<<8);
 
@@ -250,23 +266,28 @@ static struct packet*
 receive_pkt(struct net_ctx *ctx)
 {
 	int i;
-	int ret;
 	uint8_t *buf;
 	//
-	MYSQL *mysql = ctx->mysql;
+	MYSQL *mysql;
 	//
 	char mac_str[18];
 	//
 	struct terminals_entry *entry;
-	struct log_entry log;
+	struct log_entry log = {0};
 	struct packet_log_entry pkt_log;
 	//
 	char *text;
 	struct packet *pkt;
 
+	assert(ctx && "Argument is NULL");
+
+	mysql = ctx->mysql;
+
 	buf = alloca(12);
-	if (xpeek(ctx, buf, 12) < 0)
+	if (xpeek(ctx, buf, 12) < 0) {
+		warning("Can't peek packet");
 		return NULL;
+	}
 
 	pkt = xmalloc(sizeof (struct packet));
 	pkt->len = ((uint16_t)buf[1] << 8) + (uint16_t)buf[0] + 4;
@@ -288,7 +309,7 @@ receive_pkt(struct net_ctx *ctx)
 	    pkt->type != PING_PKT     &&
 	    pkt->type != LOG_PKT      &&
 	    pkt->type != PURCHASE_PKT) {
-		warning("Unknown packet type: %02x\n", pkt->type);
+		warning("Unknown packet type: %02x", pkt->type);
 		free(pkt);
 
 		return NULL;
@@ -301,14 +322,11 @@ receive_pkt(struct net_ctx *ctx)
 
 		log.sid = ctx->sid;
 		log.time = time(NULL);
-		log.log_part = 1;
-		log.log_type = 1;
-		log.log_code = 1;
 		log.text = text;
 		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
-		warning("%s\n", text);
+		warning("%s", text);
 		free(pkt);
 
 		return NULL;
@@ -324,14 +342,11 @@ receive_pkt(struct net_ctx *ctx)
 
 		log.sid = ctx->sid;
 		log.time = time(NULL);
-		log.log_part = 1;
-		log.log_type = 1;
-		log.log_code = 1;
 		log.text = text;
 		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
-		warning("%s\n", text);
+		warning("%s", text);
 		free(pkt);
 
 		return NULL;
@@ -339,20 +354,16 @@ receive_pkt(struct net_ctx *ctx)
 
 	buf = xmalloc(pkt->len);
 
-	ret = xread(ctx, buf, pkt->len);
-	if (ret < 0) {
-		text = "Can't get full packet";
+	if (xread(ctx, buf, pkt->len) < 0) {
+		text = "Can't receive packet";
 
 		log.sid = ctx->sid;
 		log.time = time(NULL);
-		log.log_part = 1;
-		log.log_type = 1;
-		log.log_code = 1;
 		log.text = text;
 		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
-		warning("%s\n", text);
+		warning("%s", text);
 		free(pkt);
 		free(buf);
 
@@ -366,14 +377,11 @@ receive_pkt(struct net_ctx *ctx)
 
 		log.sid = ctx->sid;
 		log.time = time(NULL);
-		log.log_part = 1;
-		log.log_type = 1;
-		log.log_code = 1;
 		log.text = text;
 		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
-		warning("%s\n", text);
+		warning("%s", text);
 		free(pkt);
 		free(buf);
 
@@ -391,14 +399,11 @@ receive_pkt(struct net_ctx *ctx)
 
 		log.sid = ctx->sid;
 		log.time = time(NULL);
-		log.log_part = 1;
-		log.log_type = 1;
-		log.log_code = 1;
 		log.text = text;
 		log.text_len = strlen(text);
 		db_log(mysql, &log);
 
-		warning("%s\n", text);
+		warning("%s", text);
 		free(pkt);
 		free(buf);
 
@@ -433,7 +438,7 @@ receive_pkt(struct net_ctx *ctx)
 		pkt->text_len = buf[16];
 
 		if (pkt->len != 17 + buf[16]) {
-			warning("Size in first header and size of text not match\n");
+			warning("Size in first header and size of text not match");
 
 			free(buf);
 			free(pkt);
@@ -453,7 +458,7 @@ receive_pkt(struct net_ctx *ctx)
 
 		pkt->details_len = buf[16];
 		if (17 + pkt->details_len >= pkt->len) {
-			warning("Wrong card details field length\n");
+			warning("Wrong card details field length");
 
 			free(buf);
 			free(pkt);
@@ -464,7 +469,7 @@ receive_pkt(struct net_ctx *ctx)
 
 		pkt->cryptogram_len = buf[17 + pkt->details_len];
 		if (18 + pkt->details_len + pkt->cryptogram_len != pkt->len) {
-			warning("Wrong crytogram field length: %02x\n", pkt->cryptogram_len);
+			warning("Wrong crytogram field length: %02x", pkt->cryptogram_len);
 
 			free(buf);
 			free(pkt);
@@ -492,14 +497,20 @@ static int
 send_pkt(struct net_ctx *ctx, struct packet *pkt)
 {
 	int i;
-	MYSQL *mysql = ctx->mysql;
-	uint64_t mac = pkt->mac;
+	MYSQL *mysql;
+	uint64_t mac;
 	uint16_t crc16;
 	uint32_t date;
 	uint16_t len;
 	uint8_t *buf;
 	int ret;
 	struct packet_log_entry pkt_log;
+
+	assert(ctx && "Argument is NULL");
+	assert(pkt && "Argument is NULL");
+
+	mac = pkt->mac;
+	mysql = ctx->mysql;
 
 	switch (pkt->type) {
 	case AUTH_PKT:
@@ -546,7 +557,7 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 		break;
 
 	default:
-		error("Unknown packet type: %02x\n", pkt->type);
+		error("Unknown packet type: %02x", pkt->type);
 		exit(1);
 		break;
 	}
@@ -558,8 +569,8 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 
 	ret = xwrite(ctx, buf, len);
 	if (ret < 0) {
-		warning("Can't write full packet\n");
-		return -1;
+		warning("Can't write full packet");
+		return 1;
 	}
 
 	pkt_log.sid = ctx->sid;
@@ -576,13 +587,20 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 static int
 send_to_bank(SSL *ssl, struct packet *pkt, struct terminals_entry *term)
 {
-	int pkt_size = 100 + pkt->details_len + pkt->cryptogram_len;
-	char buf[pkt_size];
+	int pkt_size;
+	char *buf;
 	char bitmap[] = {0x32, 0x30, 0x05, 0x80, 0x20, 0xC0, 0x82, 0x00};
 	struct tm tm;
 	time_t t;
 	char time_str[12];
 	int pos;
+
+	assert(ssl  && "Argument is NULL");
+	assert(pkt  && "Argument is NULL");
+	assert(term && "Argument is NULL");
+
+	pkt_size = 128 + pkt->details_len + pkt->cryptogram_len;
+	buf = alloca(pkt_size);
 
 	t = time(NULL);
 	localtime_r(&t, &tm);
@@ -610,7 +628,10 @@ send_to_bank(SSL *ssl, struct packet *pkt, struct terminals_entry *term)
 	pos += sprintf(buf + pos, "%02d", pkt->cryptogram_len);
 	memcpy(buf + pos, pkt->cryptogram, pkt->cryptogram_len);
 
-	SSL_write(ssl, buf, pkt_size);
+	if (SSL_write(ssl, buf, pkt_size) <= 0) {
+		warning("Can't send packet to bank");
+		return 1;
+	}
 
 	return 0;
 }
@@ -628,24 +649,44 @@ recv_from_bank(SSL *ssl)
 {
 	uint8_t *buf;
 	int ret;
-	int pkt_len, pos;
-	char *pan_len_str;
-	int pan_len;
+	int pos;
+	char *pkt_len_str, *pan_len_str, *mti_str;
+	int pkt_len, pan_len;
 	struct bank_ans *ans;
 	uint8_t byte;
 
-	buf = alloca(5);
-	ret = SSL_peek(ssl, buf, 4);
+	assert(ssl && "Argument is NULL");
+
+	buf = alloca(19);
+	ret = SSL_peek(ssl, buf, 18);
 	if (ret <= 0)
 		return NULL;
 
-	buf[4] = '\0';
-	pkt_len = atoi((char*)buf);
+	pos = 0;
+	GET_FLD(buf, pkt_len_str, pos, 4);
+	pkt_len = atoi(pkt_len_str);
+
+	GET_FLD(buf, mti_str, pos, 4);
+
+	pos = 16;
+	GET_FLD(buf, pan_len_str, pos, 2);
+	pan_len = atoi(pan_len_str);
+
+	if (strcmp(mti_str, "0210")) {
+		warning("MTI field is not '0210'");
+		return NULL;
+	}
+	if (96 + pan_len != pkt_len) {
+		warning("PAN length field is not valid: pan_len: %d, pkt_len: %d", pan_len, pkt_len);
+		return NULL;
+	}
 
 	buf = alloca(pkt_len);
 	ret = SSL_read(ssl, buf, pkt_len);
-	if (ret <= 0)
+	if (ret <= 0) {
+		warning("Can't receive packet from bank");
 		return NULL;
+	}
 
 	ans = xmalloc(sizeof (struct bank_ans));
 	ans->stat = FAIL;
@@ -654,15 +695,6 @@ recv_from_bank(SSL *ssl)
 	byte = buf[pos + 3];			// 'byte' is 5th byte in bitmap
 	if (byte & 0x20)			// check 38th bit in bitmap
 		ans->stat = SUCCESS;
-
-	pos = 16;				// skip to 'PAN length' field
-	GET_FLD(buf, pan_len_str, pos, 2);
-	pan_len = atoi(pan_len_str);
-	free(pan_len_str);
-	if (96 + pan_len != pkt_len) {		// check fields validity
-		free(ans);
-		return NULL;
-	}
 
 	pos = 24 + pan_len;			// skip to 'amount' field
 	GET_FLD(buf, ans->amount, pos, 12);
@@ -679,6 +711,9 @@ recv_from_bank(SSL *ssl)
 static void
 free_bank_ans(struct bank_ans *ans)
 {
+	if (ans == NULL)
+		return;
+
 	free(ans->amount);
 	free(ans->rrn);
 	free(ans->approval_num);
@@ -699,6 +734,9 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 	char cpath[] = "/tmp/cert.XXXXXX";
 	char kpath[] = "/tmp/key.XXXXXX";
 	struct bank_ans *ans;
+
+	assert(ctx && "Argument is NULL");
+	assert(pkt && "Argument is NULL");
 
 	term = db_search_by_mac(ctx->mysql, pkt->mac);
 	bpc_head = db_get_bpc_hosts(ctx->mysql);
@@ -742,6 +780,7 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 	list_foreach (bpc_head, bpc) {
 		int fd;
 		SSL *ssl;
+		struct transactions_entry ta;
 		struct sockaddr_in addr_in = {
 			.sin_family = AF_INET,
 			.sin_addr.s_addr = htonl(INADDR_ANY),
@@ -781,6 +820,26 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 		if (!ans)
 			goto next_host;
 
+		if (ans->stat == FAIL)
+			;
+
+		ta.amount = (float)atoll(ans->amount)/100;
+		ta.rrn = ans->rrn;
+		ta.approval_num = ans->approval_num;
+		ta.response_code = atoll(ans->resp_code);
+		ta.terminal_id = ans->term_id;
+		ta.terminal_mac = 0; // TODO
+		ta.time = time(NULL);
+		ta.result = (ans->stat == SUCCESS) ? 1 : 0;
+		ta.cashbox_fn = "1234"; // TODO: nanokassa
+		ta.cashbox_i  = "1234"; // TODO: nanlkassa
+		ta.cashbox_fd = "1234"; // TODO: nanlkassa
+
+		db_new_transaction(ctx->mysql, &ta);
+		free_bank_ans(ans);
+
+		break;
+
 next_host:
 		SSL_shutdown(ssl);
 		SSL_free(ssl);
@@ -811,36 +870,30 @@ net_thread(void *args)
 	else
 		text = "Unsecure";
 
-	debug("%s connect: %s:%d\n", text, inet_ntoa(ctx->addr.sin_addr),
+	debug("%s connect: %s:%d", text, inet_ntoa(ctx->addr.sin_addr),
 	    ntohs(ctx->addr.sin_port));
 
 	ctx->inp_pkt_num = ctx->out_pkt_num = 0;
 
 	while (1) {
 		pkt = receive_pkt(ctx);
-		if (!pkt) {
-			warning("Can't get packet\n");
+		if (!pkt)
 			goto finalize;
-		}
 
 		switch (pkt->type) {
 		case AUTH_PKT:
-			debug("Client version: %d\n", pkt->version);
+			debug("Client version: %d", pkt->version);
 
 			ret = send_pkt(ctx, pkt);
-			if (ret) {
-				warning("Can't send packet\n");
+			if (ret)
 				goto free_pkt;
-			}
 
 			break;
 
 		case PING_PKT:
 			ret = send_pkt(ctx, pkt);
-			if (ret) {
-				warning("Can't send packet\n");
+			if (ret)
 				goto free_pkt;
-			}
 
 			break;
 
@@ -859,8 +912,8 @@ net_thread(void *args)
 		case PURCHASE_PKT:
 			ret = purchase_proc(ctx, pkt);
 			if (ret) {
-				warning("Can't connect to bank host\n");
-				continue;
+				warning("Can't connect to bank host");
+				goto free_pkt;
 			}
 
 			break;
