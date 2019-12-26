@@ -1,5 +1,8 @@
 a.out
 build
+
+// vim stuff
+tags
 *.swp
 *.swo
-tags
+.ycm_extra_conf.py

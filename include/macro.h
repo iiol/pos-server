@@ -9,6 +9,11 @@
 #include <wchar.h>
 
 
+enum status {
+	FAIL = 0,
+	SUCCESS = 1,
+};
+
 #define typeof(a) __typeof__(a)
 #define sqr(x) ((double)(x)*(x))
 #define SWAP(a, b) do {typeof (a) __tmp = a; a = b; b = __tmp;} while (0)

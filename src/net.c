@@ -22,20 +22,23 @@
 #include <openssl/err.h>
 
 #include <curl/curl.h>
-#include <json.h>
+#include <json-c/json.h>
 
 #include "database.h"
 #include "macro.h"
 #include "net.h"
+#include "nk.h"
 
 
 struct packet {
+	// incoming fields
 	uint16_t len;
 	uint16_t crc16;
-	uint64_t mac;
 	uint8_t num;
 
-	enum type {
+	// incoming and outgoing
+	uint64_t mac;
+	enum pkt_type {
 		AUTH_PKT     = 0x01,
 		PING_PKT     = 0x02,
 		LOG_PKT      = 0x05,
@@ -64,20 +67,22 @@ struct packet {
 
 		// purchase packet
 		struct {
+			// incoming
 			uint32_t amount;
 			uint8_t details_len;
 			uint8_t *card_details;
 			uint8_t cryptogram_len;
 			uint8_t *cryptogram;
+
+			// outgoing
+			uint8_t payment_stat;
+			char *strerror;
 		};
 	};
 };
 
 struct bank_ans {
-	enum status {
-		FAIL    = 0,
-		SUCCESS = 1,
-	} stat;
+	enum status stat;
 	char *amount;
 	char *rrn;
 	char *approval_num;
@@ -604,11 +609,26 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 
 		break;
 
-	case LOG_PKT:
+	case PURCHASE_PKT:
+		len = 14 + strlen(pkt->strerror);
+		buf = alloca(len);
+
+		buf[0] = (len - 4) & 0xFF;
+		buf[1] = ((len - 4) >> 8) & 0xFF;
+
+		for (i = 0; i < 6; ++i)
+			buf[4 + i] = (mac >> 8*i) & 0xFF;
+
+		buf[10] = ctx->out_pkt_num++;
+		buf[11] = pkt->type;
+		buf[12] = pkt->payment_stat;
+		buf[13] = strlen(pkt->strerror);
+		strncpy((char*)buf + 13, pkt->strerror, strlen(pkt->strerror));
+
 		break;
 
-	case PURCHASE_PKT:
-		break;
+	case LOG_PKT:
+		return 0;
 
 	default:
 		error("Unknown packet type: %02x", pkt->type);
@@ -780,16 +800,6 @@ free_bank_ans(struct bank_ans *ans)
 	free(ans);
 }
 
-
-static int
-send_to_nanokassa(struct net_ctx *ctx)
-{
-	json_object *jobj;
-
-	jobj = json_object_new_object();
-	debug("%s", json_object_to_json_string(jobj));
-}
-
 static int
 purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 {
@@ -815,6 +825,16 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 		return 1;
 	}
 
+	ssl_mtd = SSLv23_client_method();
+	ssl_ctx = SSL_CTX_new(ssl_mtd);
+	if (!ssl_ctx) {
+		perror("Unable to create SSL context");
+		ERR_print_errors_fp(stderr);
+		return 1;
+	}
+
+	SSL_CTX_set_ecdh_auto(ssl_ctx, 1);
+
 	cfd = open(mktemp(cpath), O_WRONLY | O_CREAT, 0600);
 	kfd = open(mktemp(kpath), O_WRONLY | O_CREAT, 0600);
 	write(cfd, term->ssl_cert, strlen(term->ssl_cert));
@@ -822,23 +842,13 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 	SYSCALL(0, close, cfd);
 	SYSCALL(0, close, kfd);
 
-	ssl_mtd = SSLv23_client_method();
-	ssl_ctx = SSL_CTX_new(ssl_mtd);
-	if (!ssl_ctx) {
-		perror("Unable to create SSL context");
-		ERR_print_errors_fp(stderr);
-		unlink(cpath);
-		unlink(kpath);
-		return 1;
-	}
-
-	SSL_CTX_set_ecdh_auto(ssl_ctx, 1);
-
 	if (SSL_CTX_use_certificate_file(ssl_ctx, cpath, SSL_FILETYPE_PEM) <= 0 ||
 	    SSL_CTX_use_PrivateKey_file(ssl_ctx, kpath, SSL_FILETYPE_PEM) <= 0) {
 		ERR_print_errors_fp(stderr);
+		SSL_CTX_free(ssl_ctx);
 		unlink(cpath);
 		unlink(kpath);
+
 		return 1;
 	}
 
@@ -859,6 +869,9 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 			.sin_addr.s_addr = htonl(bpc->ip),
 			.sin_port = htons(bpc->port),
 		};
+		struct nk_ans *nk_ans;
+		struct nk_check check;
+		struct packet out_pkt;
 
 		fd = SYSCALL(0, socket, AF_INET, SOCK_STREAM, IPPROTO_TCP);
 		if (fd == -1)
@@ -888,24 +901,66 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 		if (!ans)
 			goto next_host;
 
-		if (ans->stat == SUCCESS) {
-			// TODO: get data from nanokassa
-			ta.result = 1;
-			ta.approval_num = ans->approval_num;
-			ta.cashbox_fn = "1234";
-			ta.cashbox_i  = "1234";
-			ta.cashbox_fd = "1234";
+		if (ans->stat == FAIL) {
+			out_pkt.type = PURCHASE_PKT;
+			out_pkt.mac = pkt->mac;
+			out_pkt.payment_stat = 0;
+			// TODO: get error string by error num
+			// returned by nk
+			out_pkt.strerror = "";
+			send_pkt(ctx, &out_pkt);
+
+			SSL_shutdown(ssl);
+			SSL_free(ssl);
+			SYSCALL(0, close, fd);
+			free_bank_ans(ans);
+
+			goto err_finalize;
 		}
 
+		check.amount = ans->amount;
+		debug("%s", ans->amount);
+		nk_ans = nk_send_check(&check);
+		if (nk_ans == NULL) {
+			out_pkt.type = PURCHASE_PKT;
+			out_pkt.mac = pkt->mac;
+			out_pkt.payment_stat = 0;
+			out_pkt.strerror = "Can't get QR code";
+			send_pkt(ctx, &out_pkt);
+
+			SSL_shutdown(ssl);
+			SSL_free(ssl);
+			SYSCALL(0, close, fd);
+			free_bank_ans(ans);
+
+			goto err_finalize;
+		}
+
+		ta.result = 1;
+		ta.approval_num = ans->approval_num;
+		ta.cashbox_fn = "1234";
+		ta.cashbox_i  = "1234";
+		ta.cashbox_fd = "1234";
 		ta.amount = (float)atoll(ans->amount)/100;
 		ta.rrn = ans->rrn;
 		ta.response_code = atoll(ans->resp_code);
 		ta.terminal_id = ans->term_id;
 		ta.terminal_mac = pkt->mac;
 		ta.time = time(NULL);
-
 		db_new_transaction(ctx->mysql, &ta);
+
+		out_pkt.type = PURCHASE_PKT;
+		out_pkt.mac = pkt->mac;
+		out_pkt.payment_stat = 1;
+		out_pkt.strerror = "";
+		send_pkt(ctx, &out_pkt);
+
+		nk_free_ans(nk_ans);
 		free_bank_ans(ans);
+
+		SSL_shutdown(ssl);
+		SSL_free(ssl);
+		SYSCALL(0, close, fd);
 
 		break;
 
@@ -922,6 +977,13 @@ close_fd:
 	db_free_bpc_entries(bpc_head);
 
 	return 0;
+
+err_finalize:
+	SSL_CTX_free(ssl_ctx);
+	db_free_terminals_entry(term);
+	db_free_bpc_entries(bpc_head);
+
+	return 1;
 }
 
 void*
@@ -980,10 +1042,8 @@ net_thread(void *args)
 
 		case PURCHASE_PKT:
 			ret = purchase_proc(ctx, pkt);
-			if (ret) {
-				warning("Can't connect to bank host");
-				goto free_pkt;
-			}
+			if (ret)
+				warning("Can't handle purchase packet");
 
 			break;
 		}
