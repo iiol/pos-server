@@ -1,6 +1,6 @@
 CC = gcc
 
-LIBS = mysqlclient libssl libcrypto
+LIBS = mysqlclient libssl libcrypto libcurl json-c
 CFLAGS = -Wall -std=gnu99 -Iinclude -ggdb `pkg-config --cflags $(LIBS)`
 LFLAGS = `pkg-config --libs $(LIBS)`
 

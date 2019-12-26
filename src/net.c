@@ -21,6 +21,9 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#include <curl/curl.h>
+#include <json.h>
+
 #include "database.h"
 #include "macro.h"
 #include "net.h"
@@ -115,6 +118,57 @@ pkt_free(struct packet *pkt)
 
 
 static int
+xSSL_read(SSL *ssl, uint8_t *buf, size_t len)
+{
+	int ret;
+	size_t bytes_read;
+
+	assert(ssl && "Argument is NULL");
+	assert(buf && "Argument is NULL");
+
+	for (bytes_read = 0; bytes_read < len; bytes_read += ret) {
+		ret = SSL_read(ssl, buf + bytes_read, len);
+		if (ret <= 0)
+			return -1;
+	}
+
+	return 0;
+}
+
+static int
+xSSL_peek(SSL *ssl, uint8_t *buf, size_t len)
+{
+	int ret;
+	size_t bytes_read;
+
+	assert(ssl && "Argument is NULL");
+	assert(buf && "Argument is NULL");
+
+	for (bytes_read = 0; bytes_read < len; bytes_read += ret) {
+		ret = SSL_peek(ssl, buf + bytes_read, len);
+		if (ret <= 0)
+			return -1;
+	}
+
+	return 0;
+}
+
+static int
+xSSL_write(SSL *ssl, uint8_t *buf, size_t len)
+{
+	int ret;
+	size_t written;
+
+	for (written = 0; written < len; written += ret) {
+		ret = SSL_write(ssl, buf + written, len);
+		if (ret <= 0)
+			return -1;
+	}
+
+	return 0;
+}
+
+static int
 xread(struct net_ctx *ctx, uint8_t *buf, size_t len)
 {
 	int ret;
@@ -125,8 +179,8 @@ xread(struct net_ctx *ctx, uint8_t *buf, size_t len)
 
 	switch (ctx->type) {
 	case SECURE:
-		ret = SSL_read(ctx->ssl, buf, len);
-		if (ret <= 0)
+		ret = xSSL_read(ctx->ssl, buf, len);
+		if (ret == -1)
 			return -1;
 
 		break;
@@ -156,8 +210,8 @@ xpeek(struct net_ctx *ctx, uint8_t *buf, size_t len)
 
 	switch (ctx->type) {
 	case SECURE:
-		ret = SSL_peek(ctx->ssl, buf, len);
-		if (ret <= 0)
+		ret = xSSL_peek(ctx->ssl, buf, len);
+		if (ret == -1)
 			return -1;
 
 		break;
@@ -192,8 +246,8 @@ xwrite(struct net_ctx *ctx, uint8_t *buf, size_t len)
 
 	switch (ctx->type) {
 	case SECURE:
-		ret = SSL_write(ctx->ssl, buf, len);
-		if (!ret)
+		ret = xSSL_write(ctx->ssl, buf, len);
+		if (ret == -1)
 			return -1;
 
 		break;
@@ -628,7 +682,7 @@ send_to_bank(SSL *ssl, struct packet *pkt, struct terminals_entry *term)
 	pos += sprintf(buf + pos, "%02d", pkt->cryptogram_len);
 	memcpy(buf + pos, pkt->cryptogram, pkt->cryptogram_len);
 
-	if (SSL_write(ssl, buf, pkt_size) <= 0) {
+	if (xSSL_write(ssl, (uint8_t*)buf, pkt_size) == -1) {
 		warning("Can't send packet to bank");
 		return 1;
 	}
@@ -654,54 +708,58 @@ recv_from_bank(SSL *ssl)
 	int pkt_len, pan_len;
 	struct bank_ans *ans;
 	uint8_t byte;
+	enum status stat;
 
 	assert(ssl && "Argument is NULL");
 
 	buf = alloca(19);
-	ret = SSL_peek(ssl, buf, 18);
-	if (ret <= 0)
+	ret = xSSL_peek(ssl, buf, 18);
+	if (ret == -1)
 		return NULL;
 
 	pos = 0;
 	GET_FLD(buf, pkt_len_str, pos, 4);
-	pkt_len = atoi(pkt_len_str);
-
 	GET_FLD(buf, mti_str, pos, 4);
 
-	pos = 16;
+	byte = buf[pos + 3];			// 'byte' is 5th byte in bitmap
+	if (byte & 0x20)			// check 38th bit in bitmap
+		stat = SUCCESS;
+	else
+		stat = FAIL;
+
+	pos = 16;				// skip to 'pan len' field
 	GET_FLD(buf, pan_len_str, pos, 2);
+
+	pkt_len = atoi(pkt_len_str) + 4;
 	pan_len = atoi(pan_len_str);
 
 	if (strcmp(mti_str, "0210")) {
 		warning("MTI field is not '0210'");
 		return NULL;
 	}
-	if (96 + pan_len != pkt_len) {
-		warning("PAN length field is not valid: pan_len: %d, pkt_len: %d", pan_len, pkt_len);
+	if (90 + ((stat == FAIL)? 0 : 6) + pan_len != pkt_len) {
+		warning("PAN length field is not valid: pan_len: %d, pkt_len: %d",
+		    pan_len, pkt_len);
 		return NULL;
 	}
 
 	buf = alloca(pkt_len);
-	ret = SSL_read(ssl, buf, pkt_len);
-	if (ret <= 0) {
+	ret = xSSL_read(ssl, buf, pkt_len);
+	if (ret == -1) {
 		warning("Can't receive packet from bank");
 		return NULL;
 	}
 
 	ans = xmalloc(sizeof (struct bank_ans));
-	ans->stat = FAIL;
-
-	pos = 8;				// skip to start of 'bitmap' field
-	byte = buf[pos + 3];			// 'byte' is 5th byte in bitmap
-	if (byte & 0x20)			// check 38th bit in bitmap
-		ans->stat = SUCCESS;
+	ans->stat = stat;
 
 	pos = 24 + pan_len;			// skip to 'amount' field
 	GET_FLD(buf, ans->amount, pos, 12);
 
 	pos = 64 + pan_len;			// skip to 'RNN' field
 	GET_FLD(buf, ans->rrn, pos, 12);
-	GET_FLD(buf, ans->approval_num, pos, 6);
+	if (stat == SUCCESS)
+		GET_FLD(buf, ans->approval_num, pos, 6);
 	GET_FLD(buf, ans->resp_code, pos, 3);
 	GET_FLD(buf, ans->term_id, pos, 8);
 
@@ -720,6 +778,16 @@ free_bank_ans(struct bank_ans *ans)
 	free(ans->resp_code);
 	free(ans->term_id);
 	free(ans);
+}
+
+
+static int
+send_to_nanokassa(struct net_ctx *ctx)
+{
+	json_object *jobj;
+
+	jobj = json_object_new_object();
+	debug("%s", json_object_to_json_string(jobj));
 }
 
 static int
@@ -780,7 +848,7 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 	list_foreach (bpc_head, bpc) {
 		int fd;
 		SSL *ssl;
-		struct transactions_entry ta;
+		struct transactions_entry ta = {0};
 		struct sockaddr_in addr_in = {
 			.sin_family = AF_INET,
 			.sin_addr.s_addr = htonl(INADDR_ANY),
@@ -820,20 +888,21 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 		if (!ans)
 			goto next_host;
 
-		if (ans->stat == FAIL)
-			;
+		if (ans->stat == SUCCESS) {
+			// TODO: get data from nanokassa
+			ta.result = 1;
+			ta.approval_num = ans->approval_num;
+			ta.cashbox_fn = "1234";
+			ta.cashbox_i  = "1234";
+			ta.cashbox_fd = "1234";
+		}
 
 		ta.amount = (float)atoll(ans->amount)/100;
 		ta.rrn = ans->rrn;
-		ta.approval_num = ans->approval_num;
 		ta.response_code = atoll(ans->resp_code);
 		ta.terminal_id = ans->term_id;
-		ta.terminal_mac = 0; // TODO
+		ta.terminal_mac = pkt->mac;
 		ta.time = time(NULL);
-		ta.result = (ans->stat == SUCCESS) ? 1 : 0;
-		ta.cashbox_fn = "1234"; // TODO: nanokassa
-		ta.cashbox_i  = "1234"; // TODO: nanlkassa
-		ta.cashbox_fd = "1234"; // TODO: nanlkassa
 
 		db_new_transaction(ctx->mysql, &ta);
 		free_bank_ans(ans);

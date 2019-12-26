@@ -210,9 +210,20 @@ db_new_transaction(MYSQL *mysql, struct transactions_entry *ta)
 	struct tm tm;
 
 	assert(mysql && "Argument is NULL");
-	assert(ta && ta->rrn && ta->approval_num && ta->terminal_id &&
-	    ta->cashbox_fn && ta->cashbox_fn && ta->cashbox_i && ta->cashbox_fd &&
-	    "Argument is NULL");
+	assert(ta && "Argument is NULL");
+
+	if (!ta->rrn)
+		ta->rrn = "NULL";
+	if (!ta->approval_num)
+		ta->approval_num = "NULL";
+	if (!ta->terminal_id)
+		ta->terminal_id = "NULL";
+	if (!ta->cashbox_fn)
+		ta->cashbox_fn = "NULL";
+	if (!ta->cashbox_i)
+		ta->cashbox_i = "NULL";
+	if (!ta->cashbox_fd)
+		ta->cashbox_fd = "NULL";
 
 	size = 512 + 2*(strlen(ta->rrn) + strlen(ta->approval_num) +
 	    strlen(ta->terminal_id) + strlen(ta->cashbox_fn) +

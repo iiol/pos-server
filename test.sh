@@ -1,6 +1,6 @@
 #!/bin/sh
 
-BANK_MSG="./pkts/bank2ser.bin"
+BANK_MSG="./pkts/bank2ser.success.bin"
 BANK_KEY="./ssl/key_bank.pem"
 BANK_CERT="./ssl/cert_bank.pem"
 
