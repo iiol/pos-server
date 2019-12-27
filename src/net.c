@@ -31,18 +31,18 @@
 
 
 struct packet {
-	// incoming fields
 	uint16_t len;
 	uint16_t crc16;
 	uint8_t num;
 
-	// incoming and outgoing
+	// fill in for outgoing packets
 	uint64_t mac;
 	enum pkt_type {
 		AUTH_PKT     = 0x01,
 		PING_PKT     = 0x02,
 		LOG_PKT      = 0x05,
 		PURCHASE_PKT = 0x0D,
+		SHOW_QR_PKT  = 0x0E,
 	} type;
 
 	// special fields in packet body
@@ -78,6 +78,9 @@ struct packet {
 			uint8_t payment_stat;
 			char *strerror;
 		};
+
+		// show_qr packet
+		char *qr_str;
 	};
 };
 
@@ -101,6 +104,7 @@ pkt_free(struct packet *pkt)
 	switch (pkt->type) {
 	case AUTH_PKT:
 	case PING_PKT:
+	case SHOW_QR_PKT:
 		break;
 
 	case LOG_PKT:
@@ -326,15 +330,13 @@ receive_pkt(struct net_ctx *ctx)
 {
 	int i;
 	uint8_t *buf;
-	//
 	MYSQL *mysql;
-	//
 	char mac_str[18];
-	//
+
 	struct terminals_entry *entry;
 	struct log_entry log = {0};
 	struct packet_log_entry pkt_log;
-	//
+
 	char *text;
 	struct packet *pkt;
 
@@ -544,6 +546,10 @@ receive_pkt(struct net_ctx *ctx)
 		memcpy(pkt->cryptogram, buf + 18 + pkt->details_len, pkt->cryptogram_len);
 
 		break;
+
+	case SHOW_QR_PKT:
+		// imposible case
+		assert(NULL && "Can't receive 'SHOW_QR_PKT' packet");
 	}
 
 	free(buf);
@@ -577,15 +583,6 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 		buf = alloca(len);
 		date = time(NULL);
 
-		buf[0] = (len - 4) & 0xFF;
-		buf[1] = ((len - 4) >> 8) & 0xFF;
-
-		for (i = 0; i < 6; ++i)
-			buf[4 + i] = (mac >> 8*i) & 0xFF;
-
-		buf[10] = ctx->out_pkt_num++;
-		buf[11] = pkt->type;
-
 		for (i = 0; i < 4; ++i)
 			buf[12 + i] = (date >> 8*i) & 0xFF;
 
@@ -594,15 +591,6 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 	case PING_PKT:
 		len = 18;
 		buf = alloca(len);
-
-		buf[0] = (len - 4) & 0xFF;
-		buf[1] = ((len - 4) >> 8) & 0xFF;
-
-		for (i = 0; i < 6; ++i)
-			buf[4 + i] = (mac >> 8*i) & 0xFF;
-
-		buf[10] = ctx->out_pkt_num++;
-		buf[11] = pkt->type;
 
 		for (i = 0; i < 4; ++i)
 			buf[12] = (pkt->cli_time >> 8*i) & 0xFF;
@@ -613,17 +601,18 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 		len = 14 + strlen(pkt->strerror);
 		buf = alloca(len);
 
-		buf[0] = (len - 4) & 0xFF;
-		buf[1] = ((len - 4) >> 8) & 0xFF;
-
-		for (i = 0; i < 6; ++i)
-			buf[4 + i] = (mac >> 8*i) & 0xFF;
-
-		buf[10] = ctx->out_pkt_num++;
-		buf[11] = pkt->type;
 		buf[12] = pkt->payment_stat;
 		buf[13] = strlen(pkt->strerror);
-		strncpy((char*)buf + 13, pkt->strerror, strlen(pkt->strerror));
+		memcpy(buf + 13, pkt->strerror, strlen(pkt->strerror));
+
+		break;
+
+	case SHOW_QR_PKT:
+		len = 13 + strlen(pkt->qr_str);
+		buf = alloca(len);
+
+		buf[12] = strlen(pkt->qr_str);
+		memcpy(buf + 12, pkt->qr_str, strlen(pkt->qr_str));
 
 		break;
 
@@ -635,6 +624,15 @@ send_pkt(struct net_ctx *ctx, struct packet *pkt)
 		exit(1);
 		break;
 	}
+
+	buf[0] = (len - 4) & 0xFF;
+	buf[1] = ((len - 4) >> 8) & 0xFF;
+
+	for (i = 0; i < 6; ++i)
+		buf[4 + i] = (mac >> 8*i) & 0xFF;
+
+	buf[10] = ctx->out_pkt_num++;
+	buf[11] = pkt->type;
 
 	crc16 = get_crc16(buf + 4, len - 4);
 
@@ -734,8 +732,10 @@ recv_from_bank(SSL *ssl)
 
 	buf = alloca(19);
 	ret = xSSL_peek(ssl, buf, 18);
-	if (ret == -1)
+	if (ret == -1) {
+		warning("Can't peek packet");
 		return NULL;
+	}
 
 	pos = 0;
 	GET_FLD(buf, pkt_len_str, pos, 4);
@@ -747,7 +747,7 @@ recv_from_bank(SSL *ssl)
 	else
 		stat = FAIL;
 
-	pos = 16;				// skip to 'pan len' field
+	pos = 16;				// skip to field 'pan len'
 	GET_FLD(buf, pan_len_str, pos, 2);
 
 	pkt_len = atoi(pkt_len_str) + 4;
@@ -773,10 +773,10 @@ recv_from_bank(SSL *ssl)
 	ans = xmalloc(sizeof (struct bank_ans));
 	ans->stat = stat;
 
-	pos = 24 + pan_len;			// skip to 'amount' field
+	pos = 24 + pan_len;			// skip to field 'amount'
 	GET_FLD(buf, ans->amount, pos, 12);
 
-	pos = 64 + pan_len;			// skip to 'RNN' field
+	pos = 64 + pan_len;			// skip to field 'RNN'
 	GET_FLD(buf, ans->rrn, pos, 12);
 	if (stat == SUCCESS)
 		GET_FLD(buf, ans->approval_num, pos, 6);
@@ -819,6 +819,11 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 	term = db_search_by_mac(ctx->mysql, pkt->mac);
 	bpc_head = db_get_bpc_hosts(ctx->mysql);
 	if (term == NULL || bpc_head == NULL) {
+		if (!term)
+			warning("Terminal mac not found in table 'Terminals'");
+		if (!bpc_head)
+			warning("Bank hosts not found in table 'BpcHosts'");
+
 		db_free_bpc_entries(bpc_head);
 		db_free_terminals_entry(term);
 
@@ -828,15 +833,28 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 	ssl_mtd = SSLv23_client_method();
 	ssl_ctx = SSL_CTX_new(ssl_mtd);
 	if (!ssl_ctx) {
-		perror("Unable to create SSL context");
+		perror("SSL_CTX_new()");
 		ERR_print_errors_fp(stderr);
 		return 1;
 	}
 
 	SSL_CTX_set_ecdh_auto(ssl_ctx, 1);
 
-	cfd = open(mktemp(cpath), O_WRONLY | O_CREAT, 0600);
-	kfd = open(mktemp(kpath), O_WRONLY | O_CREAT, 0600);
+	cfd = mkstemp(cpath);
+	if (cfd == -1) {
+		perror("mkstemp()");
+		return 1;
+	}
+
+	kfd = mkstemp(kpath);
+	if (kfd == -1) {
+		perror("mkstemp()");
+		SYSCALL(0, close, cfd);
+		return 1;
+	}
+
+	fchmod(cfd, 0600);
+	fchmod(kfd, 0600);
 	write(cfd, term->ssl_cert, strlen(term->ssl_cert));
 	write(kfd, term->ssl_key,  strlen(term->ssl_key));
 	SYSCALL(0, close, cfd);
@@ -846,14 +864,14 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 	    SSL_CTX_use_PrivateKey_file(ssl_ctx, kpath, SSL_FILETYPE_PEM) <= 0) {
 		ERR_print_errors_fp(stderr);
 		SSL_CTX_free(ssl_ctx);
-		unlink(cpath);
-		unlink(kpath);
+		SYSCALL(0, unlink, cpath);
+		SYSCALL(0, unlink, kpath);
 
 		return 1;
 	}
 
-	unlink(cpath);
-	unlink(kpath);
+	SYSCALL(0, unlink, cpath);
+	SYSCALL(0, unlink, kpath);
 
 	list_foreach (bpc_head, bpc) {
 		int fd;
@@ -902,13 +920,18 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 			goto next_host;
 
 		if (ans->stat == FAIL) {
+			int rc = atoi(ans->resp_code);
+
 			out_pkt.type = PURCHASE_PKT;
 			out_pkt.mac = pkt->mac;
 			out_pkt.payment_stat = 0;
-			// TODO: get error string by error num
-			// returned by nk
-			out_pkt.strerror = "";
+			out_pkt.strerror = db_get_strerror_by_code(ctx->mysql, rc);
+			if (out_pkt.strerror == NULL) {
+				out_pkt.strerror = xmalloc(5);
+				sprintf(out_pkt.strerror, "NULL");
+			}
 			send_pkt(ctx, &out_pkt);
+			free(out_pkt.strerror);
 
 			SSL_shutdown(ssl);
 			SSL_free(ssl);
@@ -919,7 +942,6 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 		}
 
 		check.amount = ans->amount;
-		debug("%s", ans->amount);
 		nk_ans = nk_send_check(&check);
 		if (nk_ans == NULL) {
 			out_pkt.type = PURCHASE_PKT;
@@ -938,9 +960,9 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 
 		ta.result = 1;
 		ta.approval_num = ans->approval_num;
-		ta.cashbox_fn = "1234";
-		ta.cashbox_i  = "1234";
-		ta.cashbox_fd = "1234";
+		ta.cashbox_fn = nk_ans->fn_num;
+		ta.cashbox_i  = nk_ans->num_fp; // TODO: ??
+		ta.cashbox_fd = nk_ans->num_fd;
 		ta.amount = (float)atoll(ans->amount)/100;
 		ta.rrn = ans->rrn;
 		ta.response_code = atoll(ans->resp_code);
@@ -953,6 +975,11 @@ purchase_proc(struct net_ctx *ctx, struct packet *pkt)
 		out_pkt.mac = pkt->mac;
 		out_pkt.payment_stat = 1;
 		out_pkt.strerror = "";
+		send_pkt(ctx, &out_pkt);
+
+		out_pkt.type = SHOW_QR_PKT;
+		out_pkt.mac = pkt->mac;
+		out_pkt.qr_str = (char*)nk_ans->qr_code;
 		send_pkt(ctx, &out_pkt);
 
 		nk_free_ans(nk_ans);
@@ -1046,6 +1073,10 @@ net_thread(void *args)
 				warning("Can't handle purchase packet");
 
 			break;
+
+		case SHOW_QR_PKT:
+			// imposible case
+			assert(NULL && "Can't handle received 'SHOW_QR_PKT' packet");
 		}
 
 		pkt_free(pkt);

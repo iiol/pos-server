@@ -6,8 +6,20 @@
 #include "macro.h"
 
 
+// some macro magic:
+// it creates enumeration fld_names
+// and
+// macros 'FOREACH_FLD(string, array, iterator, GENERATE_CMP)'
+// wich generates list like:
+// if (!strcmp(string, "FieldName1"))
+//     array[FieldName1] = iterator;
+// else if (!strcmp(string, "FieldName2"))
+//     array[FieldName2] = iterator;
+// and so on...
 #define FOREACH_FLD(S, F, I, ARG)			\
 	ARG##_F(S, F, I, ID)				\
+	ARG(S, F, I, ResponseCode)			\
+	ARG(S, F, I, Description)			\
 	ARG(S, F, I, IP)				\
 	ARG(S, F, I, Port)				\
 	ARG(S, F, I, TerminalMac)			\
@@ -30,7 +42,7 @@
 #define GENERATE_CMP(S, F, I, CMP) else if (!strcmp(S, #CMP)) F[CMP] = I;
 #define GENERATE_CMP_L(S, F, I, CMP) else if (!strcmp(S, #CMP)) F[CMP] = I;} while (0)
 
-enum fld_types {
+enum fld_names {
 	FOREACH_FLD(0, 0, 0, GENERATE_ENUM)
 };
 
@@ -116,7 +128,10 @@ int db_new_transaction(MYSQL *mysql, struct transactions_entry *ta);
 // get from database
 struct terminals_entry *db_search_by_mac(MYSQL *mysql, uint64_t mac);
 void db_free_terminals_entry(struct terminals_entry *entry);
+
 struct bpc_entries *db_get_bpc_hosts(MYSQL *mysql);
 void db_free_bpc_entries(struct bpc_entries *entries);
+
+char *db_get_strerror_by_code(MYSQL *mysql, int rc);
 
 #endif // _DATABASE_H

@@ -269,7 +269,7 @@ db_search_by_mac(MYSQL *mysql, uint64_t mac)
 	MYSQL_ROW row;
 	MYSQL_FIELD *field;
 	unsigned long *lengths;
-	int f[FLD_COUNT];
+	int f[FLD_COUNT] = {0};
 	struct terminals_entry *entry;
 	char *s;
 
@@ -288,7 +288,7 @@ db_search_by_mac(MYSQL *mysql, uint64_t mac)
 	}
 
 	// Generate array 'f' where
-	// index is field name (in enum fld_types) and
+	// index is field name (listed in enum fld_names) and
 	// value is number of field in table
 	for (i = 0; (field = mysql_fetch_field(result)) != NULL; ++i)
 		FOREACH_FLD(field->name, f, i, GENERATE_CMP);
@@ -362,7 +362,7 @@ db_get_bpc_hosts(MYSQL *mysql)
 	MYSQL_RES *result;
 	MYSQL_ROW row;
 	MYSQL_FIELD *field;
-	int f[FLD_COUNT];
+	int f[FLD_COUNT] = {0};
 
 	assert(mysql && "Argument is NULL");
 
@@ -379,7 +379,7 @@ db_get_bpc_hosts(MYSQL *mysql)
 	}
 
 	// Generate array 'f' where
-	// index is field name (in enum fld_types) and
+	// index is field name (listed in enum fld_names) and
 	// value is number of field in table
 	for (i = 0; (field = mysql_fetch_field(result)) != NULL; ++i)
 		FOREACH_FLD(field->name, f, i, GENERATE_CMP);
@@ -415,4 +415,50 @@ db_free_bpc_entries(struct bpc_entries *entries)
 
 	for (; entries != NULL; entries = list_delete(entries))
 		;
+}
+
+char*
+db_get_strerror_by_code(MYSQL *mysql, int rc)
+{
+	int i;
+	char *str;
+	int ret;
+	char query[512];
+	MYSQL_RES *result;
+	MYSQL_ROW row;
+	MYSQL_FIELD *field;
+	int f[FLD_COUNT] = {0};
+
+	assert(mysql && "Argument is NULL");
+
+	sprintf(query, "SELECT * FROM ResponseDescriptions WHERE ResponseCode = %d", rc);
+
+	ret = mysql_real_query(mysql, query, strlen(query));
+	if (ret) {
+		warning("%s", mysql_error(mysql));
+		return NULL;
+	}
+
+	result = mysql_use_result(mysql);
+	if (!result) {
+		warning("%s", mysql_error(mysql));
+		return NULL;
+	}
+
+	// Generate array 'f' where
+	// index is field name (listed in enum fld_names) and
+	// value is number of field in table
+	for (i = 0; (field = mysql_fetch_field(result)) != NULL; ++i)
+		FOREACH_FLD(field->name, f, i, GENERATE_CMP);
+
+	for (str = NULL; (row = mysql_fetch_row(result)) != NULL;) {
+		unsigned long *lengths;
+
+		lengths = mysql_fetch_lengths(result);
+
+		free(str);
+		str = null_terminating(row[f[Description]], lengths[f[Description]]);
+	}
+
+	return str;
 }

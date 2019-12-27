@@ -7,8 +7,10 @@
 
 struct nk_ans {
 	enum status stat;
-	uint8_t *qr_code;
-	int qr_code_len;
+	char *qr_code;
+	char *fn_num;
+	char *num_fp;
+	char *num_fd;
 };
 
 struct nk_check {

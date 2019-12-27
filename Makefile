@@ -1,7 +1,7 @@
 CC = gcc
 
 LIBS = mysqlclient libssl libcrypto libcurl json-c
-CFLAGS = -Wall -std=gnu99 -Iinclude -ggdb `pkg-config --cflags $(LIBS)`
+CFLAGS = -Wall -std=gnu99 -Iinclude -ggdb `pkg-config --cflags $(LIBS)` -O2
 LFLAGS = `pkg-config --libs $(LIBS)`
 
 TARGET = a.out

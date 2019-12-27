@@ -82,6 +82,8 @@ nk_send(const char *msg)
 	char *url;
 	struct nk_ans *ans;
 
+	assert(msg && "Argument is NULL");
+
 	curl_slist_append(header, "Content-type: application/json");
 
 	curl = curl_easy_init();
@@ -104,12 +106,16 @@ nk_send(const char *msg)
 	}
 
 	jobj = json_tokener_parse(str.str);
+	free(str.str);
+	str.str = NULL;
 	if (!jobj) {
 		debug("Can't parse nanokassa answer");
 		curl_slist_free_all(header);
 		curl_easy_cleanup(curl);
 		return NULL;
 	}
+
+	stat = FAIL;
 
 	json_foreach(jobj, key, val) {
 		switch ((int)json_object_get_type(val)) {
@@ -140,8 +146,6 @@ nk_send(const char *msg)
 	curl_slist_free_all(header);
 	curl_easy_cleanup(curl);
 	json_object_put(jobj);
-	free(str.str);
-	str.str = NULL;
 	str.len = 0;
 
 	if (stat == FAIL) {
@@ -173,6 +177,7 @@ nk_send(const char *msg)
 	}
 
 	jobj = json_tokener_parse(str.str);
+	free(str.str);
 	if (!jobj) {
 		debug("Can't parse nanokassa answer");
 		curl_easy_cleanup(curl);
@@ -190,7 +195,27 @@ nk_send(const char *msg)
 
 			if (!strcmp(key, "check_qr_code")) {
 				ans->qr_code = xmalloc(strlen(s) + 1);
-				strcpy(nuid, s);
+				strcpy(ans->qr_code, s);
+			}
+			else if (!strcmp(key, "check_fn_num")) {
+				ans->fn_num = xmalloc(strlen(s) + 1);
+				strcpy(ans->fn_num, s);
+			}
+
+			break;
+		    }
+
+		case json_type_int:
+		    {
+			const char *num = json_object_to_json_string(val);
+
+			if (!strcmp(key, "check_num_fd")) {
+				ans->num_fd = xmalloc(strlen(num) + 1);
+				strcpy(ans->fn_num, num);
+			}
+			else if (!strcmp(key, "check_num_fp")) {
+				ans->num_fp = xmalloc(strlen(num) + 1);
+				strcpy(ans->fn_num, num);
 			}
 
 			break;
@@ -220,6 +245,9 @@ json_encrypt(json_object *iobj, enum enc_types type, char *key_file)
 	char *key;
 	struct json_object *val;
 
+	assert(iobj && "Argument is NULL");
+	assert(key_file && "Argument is NULL");
+
 	if (init == 0) {
 		srand(time(NULL));
 		init = 1;
@@ -243,7 +271,7 @@ json_encrypt(json_object *iobj, enum enc_types type, char *key_file)
 		return NULL;
 	}
 
-	// get de field
+	// get field 'de'
 	plaintext = (char*)json_object_to_json_string(iobj);
 	plaintext_len = strlen(plaintext);
 	buf = alloca(64 + 16 + plaintext_len); // 64 bytes for hash; 16 bytes for iv
@@ -273,7 +301,7 @@ json_encrypt(json_object *iobj, enum enc_types type, char *key_file)
 	EVP_CIPHER_CTX_free(ctx);
 
 
-	// calculate ab field
+	// calculate field 'ab'
 	fp = fopen(key_file, "r");
 	if (fp == NULL) {
 		warning("Can't open key_file: %s", key_file);
@@ -419,5 +447,8 @@ nk_free_ans(struct nk_ans *ans)
 		return;
 
 	free(ans->qr_code);
+	free(ans->fn_num);
+	free(ans->num_fd);
+	free(ans->num_fp);
 	free(ans);
 }

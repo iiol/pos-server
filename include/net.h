@@ -2,6 +2,10 @@
 #define _NET_H
 
 #include <netinet/in.h>
+#include <mysql/mysql.h>
+#include <openssl/ssl.h>
+
+#include "database.h"
 
 #define SOCKLEN ((socklen_t)sizeof (struct sockaddr_in))
 #define SEC_PORT   1085
